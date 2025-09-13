@@ -180,96 +180,99 @@ static int signed_overflow (signed long value, unsigned bitsize);
 static int unsigned_overflow (unsigned long value, unsigned bitsize);
 static int is_overflow (long value, unsigned bitsize);
 
+static int
+find_cpu_entry(const char *name, size_t len)
+{
+  for (unsigned i = 0; i < ARRAY_SIZE (match_cpu_table); ++i)
+    if (!strncasecmp (name, match_cpu_table[i].name, len)
+        && strlen (match_cpu_table[i].name) == len)
+      return i;
+  return -1;
+}
+
+static int
+find_ext_entry(const char *name, size_t len)
+{
+  for (unsigned i = 0; i < ARRAY_SIZE (match_ext_table); ++i)
+    if (!strncasecmp (name, match_ext_table[i].name, len)
+        && strlen (match_ext_table[i].name) == len)
+      return i;
+  return -1;
+}
+
+static void
+apply_extension(const char *name, int index, int *ok, int *err, int *mode)
+{
+  if (name[-1] == '+')
+    {
+      *ok |= match_ext_table[index].ins_ok;
+      *err &= ~match_ext_table[index].ins_ok;
+      *mode |= match_ext_table[index].cpu_mode;
+    }
+  else
+    {
+      *ok &= ~match_ext_table[index].ins_ok;
+      *err |= match_ext_table[index].ins_ok;
+      *mode &= ~match_ext_table[index].cpu_mode;
+    }
+}
+
 static void
 setup_march (const char *name, int *ok, int *err, int *mode)
 {
   if (!name || !ok || !err || !mode)
-    as_fatal (_("Invalid parameters"));
+    return;
 
   size_t len = strcspn (name, "+-");
-  int found = 0;
+  int cpu_index = find_cpu_entry(name, len);
   
-  for (unsigned i = 0; i < ARRAY_SIZE (match_cpu_table); ++i)
-    {
-      if (strlen (match_cpu_table[i].name) == len &&
-          !strncasecmp (name, match_cpu_table[i].name, len))
-        {
-          *ok = match_cpu_table[i].ins_ok;
-          *err = match_cpu_table[i].ins_err;
-          *mode = match_cpu_table[i].cpu_mode;
-          found = 1;
-          break;
-        }
-    }
-
-  if (!found)
+  if (cpu_index < 0)
     as_fatal (_("Invalid CPU is specified: %s"), name);
 
-  const char *ext_start = name + len;
-  while (*ext_start)
+  *ok = match_cpu_table[cpu_index].ins_ok;
+  *err = match_cpu_table[cpu_index].ins_err;
+  *mode = match_cpu_table[cpu_index].cpu_mode;
+
+  while (name[len])
     {
-      char op = *ext_start;
-      ext_start++;
-      len = strcspn (ext_start, "+-");
-      found = 0;
+      name = &name[len + 1];
+      len = strcspn (name, "+-");
       
-      for (unsigned i = 0; i < ARRAY_SIZE (match_ext_table); ++i)
-        {
-          if (strlen (match_ext_table[i].name) == len &&
-              !strncasecmp (ext_start, match_ext_table[i].name, len))
-            {
-              if (op == '+')
-                {
-                  *ok |= match_ext_table[i].ins_ok;
-                  *err &= ~match_ext_table[i].ins_ok;
-                  *mode |= match_ext_table[i].cpu_mode;
-                }
-              else
-                {
-                  *ok &= ~match_ext_table[i].ins_ok;
-                  *err |= match_ext_table[i].ins_ok;
-                  *mode &= ~match_ext_table[i].cpu_mode;
-                }
-              found = 1;
-              break;
-            }
-        }
+      int ext_index = find_ext_entry(name, len);
       
-      if (!found)
-        as_fatal (_("Invalid EXTENSION is specified: %s"), ext_start);
-      
-      ext_start += len;
+      if (ext_index < 0)
+        as_fatal (_("Invalid EXTENSION is specified: %s"), name);
+        
+      apply_extension(name, ext_index, ok, err, mode);
     }
 }
 
 static int
 setup_instruction (const char *inst, int *add, int *sub)
 {
-  typedef struct {
+  static const struct {
     const char *name;
     int value;
-  } instruction_t;
-
-  static const instruction_t instructions[] = {
+  } instructions[] = {
     {"idx-reg-halves", INS_IDX_HALF},
     {"sli", INS_SLI},
     {"op-ii-ld", INS_ROT_II_LD},
     {"in-f-c", INS_IN_F_C},
     {"out-c-0", INS_OUT_C_0}
   };
-
-  if (inst == NULL || add == NULL || sub == NULL) {
+  
+  if (!inst || !add || !sub) {
     return 0;
   }
-
+  
   for (size_t i = 0; i < sizeof(instructions) / sizeof(instructions[0]); i++) {
-    if (strcmp(inst, instructions[i].name) == 0) {
+    if (!strcmp(inst, instructions[i].name)) {
       *add |= instructions[i].value;
       *sub &= ~instructions[i].value;
       return 1;
     }
   }
-
+  
   return 0;
 }
 
@@ -287,7 +290,7 @@ str_to_ieee754_d (char *litP, int *sizeP);
 static str_to_float_t
 get_str_to_float (const char *arg)
 {
-  if (arg == NULL)
+  if (!arg)
     return NULL;
 
   if (strcasecmp (arg, "zeda32") == 0)
@@ -305,7 +308,9 @@ get_str_to_float (const char *arg)
   if (strcasecmp (arg, "double") == 0)
     return str_to_ieee754_d;
 
-  as_fatal (_("invalid floating point numbers type `%s'"), arg);
+  if (strcasecmp (arg, "ieee754") == 0)
+    as_fatal (_("invalid floating point numbers type `%s'"), arg);
+
   return NULL;
 }
 
@@ -313,26 +318,28 @@ static int
 setup_instruction_list (const char *list, int *add, int *sub)
 {
   char buf[16];
-  const char *current = list;
-  const char *next;
-  int count = 0;
+  const char *current;
+  const char *comma_pos;
+  int token_len;
+  int processed_count = 0;
   
-  if (list == NULL || add == NULL || sub == NULL)
+  if (!list || !add || !sub)
     return 0;
     
+  current = list;
   while (*current != '\0')
     {
-      next = strchr (current, ',');
-      size_t len = (next != NULL) ? (size_t)(next - current) : strlen (current);
+      comma_pos = strchr (current, ',');
+      token_len = comma_pos ? (comma_pos - current) : (int)strlen (current);
       
-      if (len == 0 || len >= sizeof (buf))
+      if (token_len <= 0 || token_len >= (int)sizeof (buf))
         {
           as_bad (_("invalid INST in command line: %s"), current);
           return 0;
         }
         
-      memcpy (buf, current, len);
-      buf[len] = '\0';
+      memcpy (buf, current, token_len);
+      buf[token_len] = '\0';
       
       if (!setup_instruction (buf, add, sub))
         {
@@ -340,37 +347,43 @@ setup_instruction_list (const char *list, int *add, int *sub)
           return 0;
         }
         
-      count++;
-      current = (next != NULL) ? next + 1 : current + len;
+      processed_count++;
+      current += token_len;
+      
+      if (*current == ',')
+        current++;
     }
     
-  return count;
+  return processed_count;
 }
 
 int
 md_parse_option (int c, const char* arg)
 {
-  const char* march_arg = NULL;
-  
+  if (!arg && (c == OPTION_MARCH || c == OPTION_FP_SINGLE_FORMAT || 
+               c == OPTION_FP_DOUBLE_FORMAT || c == OPTION_MACH_INST || 
+               c == OPTION_MACH_NO_INST))
+    return 0;
+
   switch (c)
     {
     case OPTION_MARCH:
-      march_arg = arg;
+      setup_march (arg, &ins_ok, &ins_err, &cpu_mode);
       break;
     case OPTION_MACH_Z80:
-      march_arg = "z80";
+      setup_march ("z80", &ins_ok, &ins_err, &cpu_mode);
       break;
     case OPTION_MACH_R800:
-      march_arg = "r800";
+      setup_march ("r800", &ins_ok, &ins_err, &cpu_mode);
       break;
     case OPTION_MACH_Z180:
-      march_arg = "z180";
+      setup_march ("z180", &ins_ok, &ins_err, &cpu_mode);
       break;
     case OPTION_MACH_EZ80_Z80:
-      march_arg = "ez80";
+      setup_march ("ez80", &ins_ok, &ins_err, &cpu_mode);
       break;
     case OPTION_MACH_EZ80_ADL:
-      march_arg = "ez80+adl";
+      setup_march ("ez80+adl", &ins_ok, &ins_err, &cpu_mode);
       break;
     case OPTION_FP_SINGLE_FORMAT:
       str_to_float = get_str_to_float (arg);
@@ -380,11 +393,11 @@ md_parse_option (int c, const char* arg)
       break;
     case OPTION_MACH_INST:
       if ((ins_ok & INS_GBZ80) == 0)
-        return setup_instruction_list (arg, & ins_ok, & ins_err);
+        return setup_instruction_list (arg, &ins_ok, &ins_err);
       break;
     case OPTION_MACH_NO_INST:
       if ((ins_ok & INS_GBZ80) == 0)
-        return setup_instruction_list (arg, & ins_err, & ins_ok);
+        return setup_instruction_list (arg, &ins_err, &ins_ok);
       break;
     case OPTION_MACH_WUD:
     case OPTION_MACH_IUD:
@@ -426,11 +439,6 @@ md_parse_option (int c, const char* arg)
       return 0;
     }
 
-  if (march_arg != NULL)
-    {
-      setup_march (march_arg, & ins_ok, & ins_err, & cpu_mode);
-    }
-
   return 1;
 }
 
@@ -439,32 +447,45 @@ md_show_usage (FILE * f)
 {
   unsigned i;
   
-  fprintf (f, _("\nCPU model options:\n"));
-  fprintf (f, _("  -march=CPU[+EXT...][-EXT...]\n"));
-  fprintf (f, _("\t\t\t  generate code for CPU, where CPU is one of:\n"));
+  if (!f) {
+    return;
+  }
   
-  for (i = 0; i < ARRAY_SIZE(match_cpu_table); ++i)
-    fprintf (f, "  %-8s\t\t  %s\n", match_cpu_table[i].name, match_cpu_table[i].comment);
+  fprintf (f, _("\n\
+CPU model options:\n\
+  -march=CPU[+EXT...][-EXT...]\n\
+\t\t\t  generate code for CPU, where CPU is one of:\n"));
+  
+  for (i = 0; i < ARRAY_SIZE(match_cpu_table); ++i) {
+    if (match_cpu_table[i].name && match_cpu_table[i].comment) {
+      fprintf (f, "  %-8s\t\t  %s\n", match_cpu_table[i].name, match_cpu_table[i].comment);
+    }
+  }
   
   fprintf (f, _("And EXT is combination (+EXT - add, -EXT - remove) of:\n"));
   
-  for (i = 0; i < ARRAY_SIZE(match_ext_table); ++i)
-    fprintf (f, "  %-8s\t\t  %s\n", match_ext_table[i].name, match_ext_table[i].comment);
+  for (i = 0; i < ARRAY_SIZE(match_ext_table); ++i) {
+    if (match_ext_table[i].name && match_ext_table[i].comment) {
+      fprintf (f, "  %-8s\t\t  %s\n", match_ext_table[i].name, match_ext_table[i].comment);
+    }
+  }
   
-  fprintf (f, _("\nCompatibility options:\n"));
-  fprintf (f, _("  -local-prefix=TEXT\t  treat labels prefixed by TEXT as local\n"));
-  fprintf (f, _("  -colonless\t\t  permit colonless labels\n"));
-  fprintf (f, _("  -sdcc\t\t\t  accept SDCC specific instruction syntax\n"));
-  fprintf (f, _("  -fp-s=FORMAT\t\t  set single precision FP numbers format\n"));
-  fprintf (f, _("  -fp-d=FORMAT\t\t  set double precision FP numbers format\n"));
-  fprintf (f, _("Where FORMAT one of:\n"));
-  fprintf (f, _("  ieee754\t\t  IEEE754 compatible (depends on directive)\n"));
-  fprintf (f, _("  half\t\t\t  IEEE754 half precision (16 bit)\n"));
-  fprintf (f, _("  single\t\t  IEEE754 single precision (32 bit)\n"));
-  fprintf (f, _("  double\t\t  IEEE754 double precision (64 bit)\n"));
-  fprintf (f, _("  zeda32\t\t  Zeda z80float library 32 bit format\n"));
-  fprintf (f, _("  math48\t\t  48 bit format from Math48 library\n"));
-  fprintf (f, _("\nDefault: -march=z80+xyhl+infc\n"));
+  fprintf (f, _("\n\
+Compatibility options:\n\
+  -local-prefix=TEXT\t  treat labels prefixed by TEXT as local\n\
+  -colonless\t\t  permit colonless labels\n\
+  -sdcc\t\t\t  accept SDCC specific instruction syntax\n\
+  -fp-s=FORMAT\t\t  set single precision FP numbers format\n\
+  -fp-d=FORMAT\t\t  set double precision FP numbers format\n\
+Where FORMAT one of:\n\
+  ieee754\t\t  IEEE754 compatible (depends on directive)\n\
+  half\t\t\t  IEEE754 half precision (16 bit)\n\
+  single\t\t  IEEE754 single precision (32 bit)\n\
+  double\t\t  IEEE754 double precision (64 bit)\n\
+  zeda32\t\t  Zeda z80float library 32 bit format\n\
+  math48\t\t  48 bit format from Math48 library\n\
+\n\
+Default: -march=z80+xyhl+infc\n"));
 }
 
 static symbolS * zero;
@@ -532,88 +553,75 @@ static const struct reg_entry regtable[] =
 void
 md_begin (void)
 {
-  expressionS nul = {0};
-  expressionS reg = {0};
-  char *saved_input_ptr;
+  expressionS nul, reg;
+  char * p;
+  unsigned int i, j, k;
   char buf[BUFLEN];
+
+  if (BUFLEN == 0) return;
+
+  memset (&reg, 0, sizeof (reg));
+  memset (&nul, 0, sizeof (nul));
 
   if (ins_ok & INS_EZ80)
     listing_lhs_width = 6;
 
   reg.X_op = O_register;
   reg.X_md = 0;
-  reg.X_add_symbol = NULL;
-  reg.X_op_symbol = NULL;
-
-  for (unsigned int i = 0; i < ARRAY_SIZE(regtable); ++i)
+  reg.X_add_symbol = reg.X_op_symbol = 0;
+  
+  for (i = 0; i < ARRAY_SIZE(regtable); ++i)
     {
       if (regtable[i].isa && !(regtable[i].isa & ins_ok))
-        continue;
-
+	continue;
       reg.X_add_number = regtable[i].number;
-      size_t name_len = strlen(regtable[i].name);
-      
-      if (name_len >= BUFLEN - 1)
+      k = strlen(regtable[i].name);
+      if (k >= BUFLEN)
         continue;
-
-      buf[name_len] = '\0';
-      unsigned int max_combinations = 1U << name_len;
-
-      for (unsigned int combination = 0; combination < max_combinations; ++combination)
+      buf[k] = 0;
+      
+      for (j = (1u << k); j; --j)
         {
-          for (size_t k = 0; k < name_len; ++k)
+          for (k = 0; regtable[i].name[k]; ++k)
             {
-              buf[k] = (combination & (1U << k)) 
-                       ? TOUPPER(regtable[i].name[k]) 
-                       : regtable[i].name[k];
+              buf[k] = (j & (1u << k)) ? TOUPPER(regtable[i].name[k]) : regtable[i].name[k];
             }
-          
-          symbolS *psym = symbol_find_or_make(buf);
-          if (psym != NULL)
-            {
-              S_SET_SEGMENT(psym, reg_section);
-              symbol_set_value_expression(psym, &reg);
-            }
+          symbolS * psym = symbol_find_or_make(buf);
+	  S_SET_SEGMENT(psym, reg_section);
+	  symbol_set_value_expression(psym, &reg);
         }
     }
-
-  saved_input_ptr = input_line_pointer;
+  p = input_line_pointer;
   input_line_pointer = (char *) "0";
   nul.X_md = 0;
   expression(&nul);
-  input_line_pointer = saved_input_ptr;
+  input_line_pointer = p;
   zero = make_expr_symbol(&nul);
   linkrelax = 0;
 }
 
-void z80_md_finish(void)
+void
+z80_md_finish (void)
 {
-    static const struct {
-        unsigned int mask;
-        int mach_type;
-    } mach_map[] = {
-        {INS_Z80, bfd_mach_z80},
-        {INS_R800, bfd_mach_r800},
-        {INS_Z180, bfd_mach_z180},
-        {INS_GBZ80, bfd_mach_gbz80},
-        {INS_Z80N, bfd_mach_z80n}
-    };
-    
-    int mach_type = 0;
-    unsigned int march = ins_ok & INS_MARCH_MASK;
-    
-    if (march == INS_EZ80) {
-        mach_type = cpu_mode ? bfd_mach_ez80_adl : bfd_mach_ez80_z80;
-    } else {
-        for (size_t i = 0; i < sizeof(mach_map) / sizeof(mach_map[0]); i++) {
-            if (march == mach_map[i].mask) {
-                mach_type = mach_map[i].mach_type;
-                break;
-            }
-        }
-    }
-    
-    bfd_set_arch_mach(stdoutput, TARGET_ARCH, mach_type);
+  int mach_type;
+  int march = ins_ok & INS_MARCH_MASK;
+
+  if (march == INS_Z80)
+    mach_type = bfd_mach_z80;
+  else if (march == INS_R800)
+    mach_type = bfd_mach_r800;
+  else if (march == INS_Z180)
+    mach_type = bfd_mach_z180;
+  else if (march == INS_GBZ80)
+    mach_type = bfd_mach_gbz80;
+  else if (march == INS_EZ80)
+    mach_type = cpu_mode ? bfd_mach_ez80_adl : bfd_mach_ez80_z80;
+  else if (march == INS_Z80N)
+    mach_type = bfd_mach_z80n;
+  else
+    mach_type = 0;
+
+  bfd_set_arch_mach (stdoutput, TARGET_ARCH, mach_type);
 }
 
 #if defined (OBJ_ELF) || defined (OBJ_MAYBE_ELF)
@@ -627,17 +635,15 @@ z80_elf_final_processing (void)
 }
 #endif
 
-static const char *skip_space(const char *s)
+static const char *
+skip_space (const char *s)
 {
-    if (s == NULL) {
-        return NULL;
-    }
+  if (s == NULL)
+    return NULL;
     
-    while (*s != '\0' && is_whitespace(*s)) {
-        ++s;
-    }
-    
-    return s;
+  while (is_whitespace (*s))
+    ++s;
+  return s;
 }
 
 /* A non-zero return-value causes a continue in the
@@ -645,176 +651,141 @@ static const char *skip_space(const char *s)
 int
 z80_start_line_hook (void)
 {
-  char *p;
+  char *p, quote;
   char buf[4];
 
-  p = input_line_pointer;
-  while (*p && *p != '\n')
+  for (p = input_line_pointer; *p && *p != '\n'; ++p)
     {
-      if (*p == '\'')
-        {
-          if (p[1] != 0 && p[1] != '\'' && p[2] == '\'')
-            {
-              snprintf (buf, 4, "%3d", (unsigned char)p[1]);
-              *p++ = buf[0];
-              *p++ = buf[1];
-              *p++ = buf[2];
-              continue;
-            }
-          if (!handle_quoted_string(p, '\''))
-            return 1;
-        }
-      else if (*p == '"')
-        {
-          if (!handle_quoted_string(p, '"'))
-            return 1;
-        }
-      else if (*p == '#' && sdcc_compat)
-        {
-          handle_sdcc_immediate(p);
-        }
-      ++p;
+      switch (*p)
+	{
+	case '\'':
+	  if (p[1] != 0 && p[1] != '\'' && p[2] == '\'')
+	    {
+	      snprintf (buf, sizeof(buf), "%3d", (unsigned char)p[1]);
+	      *p++ = buf[0];
+	      *p++ = buf[1];
+	      *p++ = buf[2];
+	      break;
+	    }
+	  /* Fall through.  */
+	case '"':
+	  quote = *p++;
+	  while (quote != *p && '\n' != *p)
+	    ++p;
+	  if (quote != *p)
+	    {
+	      as_bad (_("-- unterminated string"));
+	      ignore_rest_of_line ();
+	      return 1;
+	    }
+	  break;
+	case '#':
+	  if (!sdcc_compat)
+	   break;
+	  if (is_whitespace (p[1]) && *skip_space (p + 1) == '(')
+	    {
+	      *p++ = '0';
+	      *p = '+';
+	    }
+	  else
+	    *p = (p[1] == '(') ? '+' : ' ';
+	  break;
+	}
     }
 
   if (sdcc_compat && *input_line_pointer == '0')
-    handle_dollar_labels();
+    {
+      char *dollar;
+
+      for (p = input_line_pointer; *p >= '0' && *p <= '9'; ++p)
+	;
+
+      if (p[0] == '$' && p[1] == ':')
+	{
+	  dollar = p;
+	  for (p = input_line_pointer; *p == '0' && p < dollar - 1; ++p)
+	    {
+	      *p = ' ';
+	    }
+	}
+    }
 
   if (is_name_beginner (*input_line_pointer))
-    return handle_label_assignment();
-
-  return 0;
-}
-
-static int
-handle_quoted_string(char *p, char quote)
-{
-  char *start = p++;
-  while (*p && *p != '\n' && *p != quote)
-    ++p;
-  
-  if (*p != quote)
     {
-      as_bad (_("-- unterminated string"));
-      ignore_rest_of_line ();
-      return 0;
-    }
-  return 1;
-}
+      char *name;
+      char c, *rest, *line_start;
+      int len;
 
-static void
-handle_sdcc_immediate(char *p)
-{
-  if (is_whitespace (p[1]) && *skip_space (p + 1) == '(')
-    {
-      *p++ = '0';
-      *p = '+';
-    }
-  else
-    {
-      *p = (p[1] == '(') ? '+' : ' ';
-    }
-}
-
-static void
-handle_dollar_labels(void)
-{
-  char *p = input_line_pointer;
-  char *dollar = NULL;
-
-  while (*p >= '0' && *p <= '9')
-    ++p;
-
-  if (p[0] == '$' && p[1] == ':')
-    {
-      dollar = p;
-      p = input_line_pointer;
-      while (*p == '0' && p < dollar - 1)
+      line_start = input_line_pointer;
+      if (ignore_input ())
+	return 0;
+      c = get_symbol_name (&name);
+      rest = input_line_pointer + 1;
+      if (c == ':' && *rest == ':')
         {
-          *p = ' ';
-          ++p;
+          if (sdcc_compat)
+            *rest = ' ';
+          ++rest;
         }
+      rest = (char*)skip_space (rest);
+      
+      if (*rest == '=')
+	len = (rest[1] == '=') ? 2 : 1;
+      else
+	{
+	  if (*rest == '.')
+	    ++rest;
+	  if (strncasecmp (rest, "EQU", 3) == 0)
+	    len = 3;
+	  else if (strncasecmp (rest, "DEFL", 4) == 0)
+	    len = 4;
+	  else
+	    len = 0;
+	}
+	
+      if (len && (len <= 2 || !ISALPHA (rest[len])))
+	{
+	  if (line_start[-1] == '\n')
+	    {
+	      bump_line_counters ();
+	      LISTING_NEWLINE ();
+	    }
+	  input_line_pointer = rest + len - 1;
+	  
+	  switch (len)
+	    {
+	    case 1:
+	    case 4:
+	      equals (name, 1);
+	      break;
+	    case 2:
+	    case 3:
+	      equals (name, 0);
+	      break;
+	    }
+	  return 1;
+	}
+      else
+	{
+	  (void) restore_line_pointer (c);
+	  input_line_pointer = line_start;
+	}
     }
-}
-
-static int
-handle_label_assignment(void)
-{
-  char *name;
-  char c;
-  char *rest;
-  char *line_start;
-  int len;
-
-  line_start = input_line_pointer;
-  
-  if (ignore_input ())
-    return 0;
-    
-  c = get_symbol_name (&name);
-  rest = input_line_pointer + 1;
-  
-  if (c == ':' && *rest == ':')
-    {
-      if (sdcc_compat)
-        *rest = ' ';
-      ++rest;
-    }
-    
-  rest = (char*)skip_space (rest);
-  len = get_assignment_type(rest);
-  
-  if (len == 0 || (len > 2 && ISALPHA (rest[len])))
-    {
-      (void) restore_line_pointer (c);
-      input_line_pointer = line_start;
-      return 0;
-    }
-
-  if (line_start[-1] == '\n')
-    {
-      bump_line_counters ();
-      LISTING_NEWLINE ();
-    }
-    
-  input_line_pointer = rest + len - 1;
-  
-  if (len == 1 || len == 4)
-    equals (name, 1);
-  else
-    equals (name, 0);
-    
-  return 1;
-}
-
-static int
-get_assignment_type(char *rest)
-{
-  if (*rest == '=')
-    return (rest[1] == '=') ? 2 : 1;
-    
-  if (*rest == '.')
-    ++rest;
-    
-  if (strncasecmp (rest, "EQU", 3) == 0)
-    return 3;
-    
-  if (strncasecmp (rest, "DEFL", 4) == 0)
-    return 4;
-    
   return 0;
 }
 
 symbolS *
-md_undefined_symbol (char *name ATTRIBUTE_UNUSED)
+md_undefined_symbol (char *name)
 {
+  (void)name;
   return NULL;
 }
 
 const char *
 md_atof (int type, char *litP, int *sizeP)
 {
-  if (litP == NULL || sizeP == NULL)
-    return NULL;
+  if (!litP || !sizeP)
+    return "Invalid input parameters";
 
   switch (type)
     {
@@ -822,14 +793,14 @@ md_atof (int type, char *litP, int *sizeP)
     case 'F':
     case 's':
     case 'S':
-      if (str_to_float != NULL)
+      if (str_to_float)
         return str_to_float (litP, sizeP);
       break;
     case 'd':
     case 'D':
     case 'r':
     case 'R':
-      if (str_to_double != NULL)
+      if (str_to_double)
         return str_to_double (litP, sizeP);
       break;
     default:
@@ -839,19 +810,20 @@ md_atof (int type, char *litP, int *sizeP)
 }
 
 valueT
-md_section_align (segT seg ATTRIBUTE_UNUSED, valueT size)
+md_section_align (segT seg, valueT size)
 {
+  (void)seg;
   return size;
 }
 
 long
-md_pcrel_from (fixS * fixp)
+md_pcrel_from(fixS *fixp)
 {
-  if (fixp == NULL || fixp->fx_frag == NULL)
-    {
-      return 0;
+    if (fixp == NULL || fixp->fx_frag == NULL) {
+        return 0;
     }
-  return fixp->fx_where + fixp->fx_frag->fr_address;
+    
+    return fixp->fx_where + fixp->fx_frag->fr_address;
 }
 
 typedef const char * (asfunc)(char, char, const char*);
@@ -866,26 +838,17 @@ typedef struct _table_t
 } table_t;
 
 /* Compares the key for structs that start with a char * to the key.  */
-static int key_cmp(const void *a, const void *b)
+static int
+key_cmp(const void *a, const void *b)
 {
-    if (a == NULL || b == NULL) {
-        return 0;
-    }
+    const char *str_a = *(const char **)a;
+    const char *str_b = *(const char **)b;
     
-    const char *const *ptr_a = (const char *const *)a;
-    const char *const *ptr_b = (const char *const *)b;
+    if (str_a == NULL && str_b == NULL) return 0;
+    if (str_a == NULL) return -1;
+    if (str_b == NULL) return 1;
     
-    if (*ptr_a == NULL && *ptr_b == NULL) {
-        return 0;
-    }
-    if (*ptr_a == NULL) {
-        return -1;
-    }
-    if (*ptr_b == NULL) {
-        return 1;
-    }
-    
-    return strcmp(*ptr_a, *ptr_b);
+    return strcmp(str_a, str_b);
 }
 
 char buf[BUFLEN];
@@ -896,16 +859,17 @@ const char *key = buf;
 static char err_flag;
 
 static void
-error (const char * message)
+error(const char *message)
 {
-  if (err_flag || message == NULL)
+  if (err_flag || !message)
     return;
 
-  as_bad ("%s", message);
+  as_bad("%s", message);
   err_flag = 1;
 }
 
-static void ill_op(void)
+static void
+ill_op(void)
 {
     error(_("illegal operand"));
 }
@@ -914,19 +878,17 @@ static void
 wrong_mach (int ins_type)
 {
   if ((ins_type & ins_err) != 0)
-  {
     ill_op ();
-  }
   else
-  {
     as_warn (_("undocumented instruction"));
-  }
 }
 
-static void check_mach(int ins_type)
+static void
+check_mach (int ins_type)
 {
-    if ((ins_type & ins_ok) == 0) {
-        wrong_mach(ins_type);
+  if ((ins_type & ins_ok) == 0)
+    {
+      wrong_mach (ins_type);
     }
 }
 
@@ -934,54 +896,53 @@ static void check_mach(int ins_type)
 static int
 is_indir (const char *s)
 {
+  const char *p;
+  int indir, depth;
+
   if (!s)
     return 0;
-  
-  int indir = (*s == '(');
-  int depth = 0;
-  const char *p = s;
 
-  while (*p && *p != ',')
+  indir = (*s == '(');
+
+  for (p = s, depth = 0; *p && *p != ','; ++p)
     {
       if (*p == '"' || *p == '\'')
         {
-          char quote = *p;
-          p++;
+          char quote = *p++;
           while (*p && *p != quote && *p != '\n')
             {
               if (*p == '\\' && p[1])
-                p++;
-              p++;
+                ++p;
+              ++p;
             }
-          if (*p)
-            p++;
         }
       else if (*p == '(')
         {
-          depth++;
-          p++;
+          ++depth;
         }
       else if (*p == ')')
         {
-          depth--;
-          if (depth < 0)
-            error (_("mismatched parentheses"));
+          --depth;
           if (depth == 0)
             {
-              const char *next = skip_space (p + 1);
-              if (*next && *next != ',')
+              p = skip_space (p + 1);
+              if (*p && *p != ',')
                 indir = 0;
+              --p;
             }
-          p++;
-        }
-      else
-        {
-          p++;
+          if (depth < 0)
+            {
+              error (_("mismatched parentheses"));
+              return 0;
+            }
         }
     }
 
   if (depth != 0)
-    error (_("mismatched parentheses"));
+    {
+      error (_("mismatched parentheses"));
+      return 0;
+    }
 
   return indir;
 }
@@ -1031,6 +992,9 @@ parse_exp_not_indexed (const char *s, expressionS *op)
   int indir;
   int make_shift = -1;
 
+  if (!s || !op)
+    return NULL;
+
   memset (op, 0, sizeof (*op));
   p = skip_space (s);
   
@@ -1046,45 +1010,39 @@ parse_exp_not_indexed (const char *s, expressionS *op)
   
   if (indir && (ins_ok & INS_GBZ80))
     {
-      p = skip_space (p + 1);
+      p = skip_space (p+1);
       if (!strncasecmp (p, "hl", 2))
-        {
-          p = skip_space (p + 2);
-          const char *next_char = skip_space (p + 1);
-          if (*next_char == ')' && (*p == '+' || *p == '-'))
-            {
-              op->X_op = O_md1;
-              op->X_add_symbol = NULL;
-              op->X_add_number = (*p == '+') ? REG_HL : -REG_HL;
-              input_line_pointer = (char*)(next_char + 1);
-              return input_line_pointer;
-            }
-        }
+	{
+	  p = skip_space(p+2);
+	  if (*skip_space(p+1) == ')' && (*p == '+' || *p == '-'))
+	    {
+	      op->X_op = O_md1;
+	      op->X_add_symbol = NULL;
+	      op->X_add_number = (*p == '+') ? REG_HL : -REG_HL;
+	      input_line_pointer = (char*)skip_space(p + 1) + 1;
+	      return input_line_pointer;
+	    }
+	}
     }
   
-  input_line_pointer = (char*)s;
+  input_line_pointer = (char*) s ;
   expression (op);
   resolve_register (op);
   
   if (op->X_op == O_absent)
-    {
-      error (_("missing operand"));
-    }
+    error (_("missing operand"));
   else if (op->X_op == O_illegal)
-    {
-      error (_("bad expression syntax"));
-    }
+    error (_("bad expression syntax"));
 
   if (make_shift >= 0)
     {
       expressionS data;
-      memset (&data, 0, sizeof (data));
-      data.X_op = O_constant;
-      data.X_add_number = make_shift;
-      
       op->X_add_symbol = make_expr_symbol (op);
       op->X_add_number = 0;
       op->X_op = O_right_shift;
+      memset (&data, 0, sizeof (data));
+      data.X_op = O_constant;
+      data.X_add_number = make_shift;
       op->X_op_symbol = make_expr_symbol (&data);
     }
   
@@ -1094,36 +1052,41 @@ parse_exp_not_indexed (const char *s, expressionS *op)
 static int
 unify_indexed (expressionS *op)
 {
-  if (op == NULL || op->X_add_symbol == NULL)
+  expressionS *reg_expr;
+  int rnum;
+  
+  if (!op || !op->X_add_symbol)
+    return 0;
+    
+  reg_expr = symbol_get_value_expression (op->X_add_symbol);
+  if (!reg_expr || O_register != reg_expr->X_op)
     return 0;
 
-  expressionS *sym_expr = symbol_get_value_expression(op->X_add_symbol);
-  if (sym_expr == NULL || sym_expr->X_op != O_register)
-    return 0;
-
-  int rnum = sym_expr->X_add_number;
-  if ((rnum != REG_IX && rnum != REG_IY) || contains_register(op->X_op_symbol))
+  rnum = reg_expr->X_add_number;
+  if ((REG_IX != rnum && REG_IY != rnum) || contains_register (op->X_op_symbol))
     {
-      ill_op();
+      ill_op ();
       return 0;
     }
 
-  if (op->X_op == O_subtract)
+  if (O_subtract == op->X_op)
     {
-      expressionS minus = {0};
+      expressionS minus;
+      memset (&minus, 0, sizeof (minus));
       minus.X_op = O_uminus;
       minus.X_add_symbol = op->X_op_symbol;
-      op->X_op_symbol = make_expr_symbol(&minus);
+      op->X_op_symbol = make_expr_symbol (&minus);
       op->X_op = O_add;
     }
 
   if (op->X_add_number != 0)
     {
-      expressionS add = {0};
+      expressionS add;
+      memset (&add, 0, sizeof (add));
       add.X_op = O_symbol;
       add.X_add_number = op->X_add_number;
       add.X_add_symbol = op->X_op_symbol;
-      op->X_add_symbol = make_expr_symbol(&add);
+      op->X_add_symbol = make_expr_symbol (&add);
     }
   else
     {
@@ -1141,47 +1104,27 @@ parse_exp (const char *s, expressionS *op)
 {
   const char* res = parse_exp_not_indexed (s, op);
   
-  if (!res || !op)
-    return res;
-    
-  switch (op->X_op)
-    {
-    case O_add:
-    case O_subtract:
-      if (unify_indexed (op) && op->X_md)
-        op->X_op = O_md1;
-      break;
-      
-    case O_register:
-      if (op->X_md && 
-          (op->X_add_number == REG_IX || op->X_add_number == REG_IY))
-        {
-          op->X_add_symbol = zero;
-          op->X_op = O_md1;
-        }
-      break;
-      
-    case O_constant:
-      if (sdcc_compat && is_indir (res))
-        {
-          expressionS off = *op;
-          res = parse_exp (res, op);
-          
-          if (!op || op->X_op != O_md1 || op->X_add_symbol != zero)
-            {
-              ill_op ();
-            }
-          else
-            {
-              op->X_add_symbol = make_expr_symbol (&off);
-            }
-        }
-      break;
-      
-    default:
-      break;
+  if (op->X_op == O_add || op->X_op == O_subtract) {
+    if (unify_indexed (op) && op->X_md)
+      op->X_op = O_md1;
+  } else if (op->X_op == O_register) {
+    if (op->X_md && (op->X_add_number == REG_IX || op->X_add_number == REG_IY)) {
+      op->X_add_symbol = zero;
+      op->X_op = O_md1;
     }
-    
+  } else if (op->X_op == O_constant) {
+    if (sdcc_compat && is_indir (res)) {
+      expressionS off;
+      off = *op;
+      res = parse_exp (res, op);
+      if (op->X_op != O_md1 || op->X_add_symbol != zero) {
+        ill_op ();
+      } else {
+        op->X_add_symbol = make_expr_symbol (&off);
+      }
+    }
+  }
+  
   return res;
 }
 
@@ -1208,47 +1151,58 @@ static const struct reg_entry cc_tab[] =
 static const char *
 parse_cc (const char *s, char * op)
 {
-  if (!s || !op)
-    return NULL;
-
+  const char *p;
   int i;
-  for (i = 0; i < BUFLEN && ISALPHA(s[i]); ++i)
+  struct reg_entry * cc_p;
+
+  if (!s || !op) {
+    return NULL;
+  }
+
+  for (i = 0; i < BUFLEN - 1; ++i)
     {
-      buf[i] = TOLOWER(s[i]);
+      if (!ISALPHA (s[i]))
+	break;
+      buf[i] = TOLOWER (s[i]);
     }
 
-  if (i >= BUFLEN)
+  if (i >= BUFLEN - 1 && ISALPHA(s[i])) {
     return NULL;
+  }
 
-  if (s[i] != 0 && s[i] != ',')
-    return NULL;
+  if ((s[i] == 0) || (s[i] == ','))
+    {
+      buf[i] = 0;
+      cc_p = bsearch (&key, cc_tab, ARRAY_SIZE (cc_tab),
+		      sizeof (cc_tab[0]), key_cmp);
+    }
+  else
+    cc_p = NULL;
 
-  buf[i] = 0;
-  
-  struct reg_entry *cc_p = bsearch(&key, cc_tab, ARRAY_SIZE(cc_tab),
-                                   sizeof(cc_tab[0]), key_cmp);
-  
-  if (!cc_p)
-    return NULL;
+  if (cc_p)
+    {
+      *op = cc_p->number;
+      p = s + i;
+    }
+  else
+    p = NULL;
 
-  *op = cc_p->number;
-  return s + i;
+  return p;
 }
 
 static const char *
 emit_insn (char prefix, char opcode, const char * args)
 {
   char *p;
-  size_t insn_size = prefix ? 2 : 1;
+  int frag_size = prefix ? 2 : 1;
+
+  p = frag_more (frag_size);
   
-  p = frag_more (insn_size);
-  if (!p)
-    return NULL;
-    
   if (prefix)
     {
       *p++ = prefix;
     }
+  
   *p = opcode;
   return args;
 }
@@ -1262,11 +1216,6 @@ void z80_cons_fix_new (fragS *frag_p, int offset, int nbytes, expressionS *exp)
       BFD_RELOC_24,
       BFD_RELOC_32
     };
-
-  if (frag_p == NULL || exp == NULL)
-    {
-      return;
-    }
 
   if (nbytes < 1 || nbytes > 4)
     {
@@ -1297,49 +1246,62 @@ emit_data_val (expressionS * val, int size)
       return;
     }
 
-  switch (size)
-    {
-    case 1: r_type = BFD_RELOC_8; break;
-    case 2: r_type = BFD_RELOC_16; break;
-    case 3: r_type = BFD_RELOC_24; break;
-    case 4: r_type = BFD_RELOC_32; break;
-    case 8: r_type = BFD_RELOC_64; break;
-    default:
-      as_fatal (_("invalid data size %d"), size);
-    }
+  r_type = get_base_reloc_type(size);
+  if (r_type == BFD_RELOC_NONE)
+    as_fatal (_("invalid data size %d"), size);
 
-  if (   (val->X_op == O_register)
-      || (val->X_op == O_md1)
-      || contains_register (val->X_add_symbol)
-      || contains_register (val->X_op_symbol))
+  if (is_register_expression(val))
     ill_op ();
 
   if (size <= 2 && val->X_op_symbol)
     {
-      process_relocation_for_small_size(val, &size, &r_type, &p);
+      handle_shift_operation(val, size, &r_type, &p);
     }
 
   fix_new_exp (frag_now, p - frag_now->fr_literal, size, val, false, r_type);
 }
 
+static bfd_reloc_code_real_type
+get_base_reloc_type(int size)
+{
+  switch (size)
+    {
+    case 1: return BFD_RELOC_8;
+    case 2: return BFD_RELOC_16;
+    case 3: return BFD_RELOC_24;
+    case 4: return BFD_RELOC_32;
+    case 8: return BFD_RELOC_64;
+    default: return BFD_RELOC_NONE;
+    }
+}
+
+static bool
+is_register_expression(expressionS *val)
+{
+  return (val->X_op == O_register)
+      || (val->X_op == O_md1)
+      || contains_register (val->X_add_symbol)
+      || contains_register (val->X_op_symbol);
+}
+
 static void
-process_relocation_for_small_size(expressionS *val, int *size, bfd_reloc_code_real_type *r_type, char **p)
+handle_shift_operation(expressionS *val, int size, bfd_reloc_code_real_type *r_type, char **p)
 {
   bool simplify = true;
   int shift = symbol_get_value_expression (val->X_op_symbol)->X_add_number;
   
-  if (val->X_op == O_bit_and && shift == (1 << (*size * 8)) - 1)
+  if (val->X_op == O_bit_and && shift == (1 << (size*8))-1)
     shift = 0;
   else if (val->X_op != O_right_shift)
     shift = -1;
 
-  if (*size == 1)
+  if (size == 1)
     {
-      simplify = process_byte_relocation(shift, r_type);
+      *r_type = get_byte_reloc_type(shift, &simplify);
     }
-  else if (*size == 2)
+  else
     {
-      simplify = process_word_relocation(shift, r_type, val, p, size);
+      handle_word_shift(val, shift, r_type, p, &simplify);
     }
 
   if (simplify)
@@ -1350,56 +1312,50 @@ process_relocation_for_small_size(expressionS *val, int *size, bfd_reloc_code_re
     }
 }
 
-static bool
-process_byte_relocation(int shift, bfd_reloc_code_real_type *r_type)
+static bfd_reloc_code_real_type
+get_byte_reloc_type(int shift, bool *simplify)
 {
   switch (shift)
     {
-    case 0: *r_type = BFD_RELOC_Z80_BYTE0; return true;
-    case 8: *r_type = BFD_RELOC_Z80_BYTE1; return true;
-    case 16: *r_type = BFD_RELOC_Z80_BYTE2; return true;
-    case 24: *r_type = BFD_RELOC_Z80_BYTE3; return true;
-    default: return false;
+    case 0: return BFD_RELOC_Z80_BYTE0;
+    case 8: return BFD_RELOC_Z80_BYTE1;
+    case 16: return BFD_RELOC_Z80_BYTE2;
+    case 24: return BFD_RELOC_Z80_BYTE3;
+    default: 
+      *simplify = false;
+      return BFD_RELOC_8;
     }
 }
 
-static bool
-process_word_relocation(int shift, bfd_reloc_code_real_type *r_type, expressionS *val, char **p, int *size)
+static void
+handle_word_shift(expressionS *val, int shift, bfd_reloc_code_real_type *r_type, char **p, bool *simplify)
 {
   switch (shift)
     {
     case 0: 
       *r_type = BFD_RELOC_Z80_WORD0; 
-      return true;
+      break;
     case 16: 
       *r_type = BFD_RELOC_Z80_WORD1; 
-      return true;
+      break;
     case 8:
-      setup_split_word_fixup(val, p, r_type, BFD_RELOC_Z80_BYTE1, BFD_RELOC_Z80_BYTE2);
-      *size = 1;
-      return false;
     case 24:
-      setup_split_word_fixup(val, p, r_type, 0, BFD_RELOC_Z80_BYTE3);
-      *size = 1;
-      return false;
+      val->X_op = O_symbol;
+      val->X_op_symbol = NULL;
+      val->X_add_number = 0;
+      if (shift == 8)
+	{
+	  fix_new_exp (frag_now, (*p)++ - frag_now->fr_literal, 1, val, false,
+		       BFD_RELOC_Z80_BYTE1);
+	  *r_type = BFD_RELOC_Z80_BYTE2;
+	}
+      else
+	*r_type = BFD_RELOC_Z80_BYTE3;
+      *simplify = false;
+      break;
     default: 
-      return false;
+      *simplify = false;
     }
-}
-
-static void
-setup_split_word_fixup(expressionS *val, char **p, bfd_reloc_code_real_type *r_type, 
-                       bfd_reloc_code_real_type first_reloc, bfd_reloc_code_real_type second_reloc)
-{
-  val->X_op = O_symbol;
-  val->X_op_symbol = NULL;
-  val->X_add_number = 0;
-  
-  if (first_reloc != 0)
-    {
-      fix_new_exp (frag_now, (*p)++ - frag_now->fr_literal, 1, val, false, first_reloc);
-    }
-  *r_type = second_reloc;
 }
 
 static void
@@ -1414,9 +1370,6 @@ emit_byte (expressionS * val, bfd_reloc_code_real_type r_type)
     }
 
   p = frag_more (1);
-  if (p == NULL)
-    return;
-
   *p = val->X_add_number;
 
   if (contains_register (val->X_add_symbol) || contains_register (val->X_op_symbol))
@@ -1435,22 +1388,24 @@ emit_byte (expressionS * val, bfd_reloc_code_real_type r_type)
 
       if (val->X_add_number < -128 || val->X_add_number >= 128)
         {
-          const char *error_msg = (r_type == BFD_RELOC_Z80_DISP8) 
-                                   ? _("index overflow (%+" PRId64 ")")
-                                   : _("offset overflow (%+" PRId64 ")");
-          as_bad (error_msg, (int64_t) val->X_add_number);
+          if (r_type == BFD_RELOC_Z80_DISP8)
+            as_bad (_("index overflow (%+" PRId64 ")"), (int64_t) val->X_add_number);
+          else
+            as_bad (_("offset overflow (%+" PRId64 ")"), (int64_t) val->X_add_number);
         }
-      return;
     }
-
-  fix_new_exp (frag_now, p - frag_now->fr_literal, 1, val,
-               r_type == BFD_RELOC_8_PCREL, r_type);
+  else
+    {
+      fix_new_exp (frag_now, p - frag_now->fr_literal, 1, val,
+                   r_type == BFD_RELOC_8_PCREL, r_type);
+    }
 }
 
-static void emit_word(expressionS *val)
+static void
+emit_word (expressionS * val)
 {
-  int data_size = (inst_mode & INST_MODE_IL) ? 3 : 2;
-  emit_data_val(val, data_size);
+  int word_size = (inst_mode & INST_MODE_IL) ? 3 : 2;
+  emit_data_val (val, word_size);
 }
 
 static void
@@ -1459,45 +1414,39 @@ emit_mx (char prefix, char opcode, int shift, expressionS * arg)
   char *q;
   int rnum;
 
-  if (!arg) {
-    return;
-  }
-
   rnum = arg->X_add_number;
-  
   switch (arg->X_op)
     {
     case O_register:
       if (arg->X_md)
-	{
-	  if (rnum != REG_HL)
-	    {
-	      ill_op ();
-	      return;
-	    }
-	  rnum = 6;
-	}
+        {
+          if (rnum != REG_HL)
+            {
+              ill_op ();
+              return;
+            }
+          rnum = 6;
+        }
       else
-	{
-	  if ((prefix == 0) && (rnum & R_INDEX))
-	    {
-	      prefix = (rnum & R_IX) ? 0xDD : 0xFD;
-	      if (!(ins_ok & (INS_EZ80|INS_R800|INS_Z80N)))
+        {
+          if ((prefix == 0) && (rnum & R_INDEX))
+            {
+              prefix = (rnum & R_IX) ? 0xDD : 0xFD;
+              if (!(ins_ok & (INS_EZ80|INS_R800|INS_Z80N)))
                 check_mach (INS_IDX_HALF);
-	      rnum &= ~R_INDEX;
-	    }
-	  if (rnum > 7)
-	    {
-	      ill_op ();
-	      return;
-	    }
-	}
+              rnum &= ~R_INDEX;
+            }
+          if (rnum > 7)
+            {
+              ill_op ();
+              return;
+            }
+        }
       q = frag_more (prefix ? 2 : 1);
       if (prefix)
-	*q++ = prefix;
-      *q = opcode + (rnum << shift);
+        * q ++ = prefix;
+      * q ++ = opcode + (rnum << shift);
       break;
-      
     case O_md1:
       if (ins_ok & INS_GBZ80)
         {
@@ -1506,22 +1455,22 @@ emit_mx (char prefix, char opcode, int shift, expressionS * arg)
         }
       q = frag_more (2);
       *q++ = (rnum & R_IX) ? 0xDD : 0xFD;
-      *q = prefix ? prefix : (opcode + (6 << shift));
-      
-      expressionS offset = *arg;
-      offset.X_op = O_symbol;
-      offset.X_add_number = 0;
-      emit_byte (&offset, BFD_RELOC_Z80_DISP8);
-      
+      *q = (prefix) ? prefix : (opcode + (6 << shift));
+      {
+        expressionS offset = *arg;
+        offset.X_op = O_symbol;
+        offset.X_add_number = 0;
+        emit_byte (&offset, BFD_RELOC_Z80_DISP8);
+      }
       if (prefix)
-	{
-	  q = frag_more (1);
-	  *q = opcode + (6 << shift);
-	}
+        {
+          q = frag_more (1);
+          *q = opcode+(6<<shift);
+        }
       break;
-      
     default:
-      abort ();
+      ill_op ();
+      return;
     }
 }
 
@@ -1563,77 +1512,83 @@ emit_m (char prefix, char opcode, const char *args)
    are allowed).  */
 
 static const char *
-emit_mr (char prefix, char opcode, const char *args)
+emit_mr(char prefix, char opcode, const char *args)
 {
-  expressionS arg_m, arg_r;
-  const char *p;
+    expressionS arg_m, arg_r;
+    const char *p;
 
-  p = parse_exp (args, &arg_m);
-
-  if (arg_m.X_op == O_register)
-    {
-      emit_mx (prefix, opcode, 0, &arg_m);
-      return p;
+    if (!args) {
+        ill_op();
+        return NULL;
     }
 
-  if (arg_m.X_op != O_md1)
-    {
-      ill_op ();
-      return p;
+    p = parse_exp(args, &arg_m);
+    if (!p) {
+        ill_op();
+        return NULL;
     }
 
-  if (*p != ',')
-    {
-      emit_mx (prefix, opcode, 0, &arg_m);
-      return p;
+    if (arg_m.X_op == O_md1) {
+        if (*p == ',') {
+            p = parse_exp(p + 1, &arg_r);
+            if (!p) {
+                ill_op();
+                return NULL;
+            }
+
+            if (arg_r.X_md == 0 && arg_r.X_op == O_register && arg_r.X_add_number < 8) {
+                opcode += arg_r.X_add_number - 6;
+            } else {
+                ill_op();
+                return p;
+            }
+
+            if (!(ins_ok & INS_Z80N)) {
+                check_mach(INS_ROT_II_LD);
+            }
+        }
+        emit_mx(prefix, opcode, 0, &arg_m);
+    } else if (arg_m.X_op == O_register) {
+        emit_mx(prefix, opcode, 0, &arg_m);
+    } else {
+        ill_op();
     }
 
-  p = parse_exp (p + 1, &arg_r);
-
-  if (arg_r.X_md != 0 || arg_r.X_op != O_register || arg_r.X_add_number >= 8)
-    {
-      ill_op ();
-      return p;
-    }
-
-  opcode += arg_r.X_add_number - 6;
-
-  if (!(ins_ok & INS_Z80N))
-    check_mach (INS_ROT_II_LD);
-
-  emit_mx (prefix, opcode, 0, &arg_m);
-  return p;
+    return p;
 }
 
-static void emit_sx(char prefix, char opcode, expressionS *arg_p)
+static void
+emit_sx (char prefix, char opcode, expressionS * arg_p)
 {
-    if (arg_p == NULL) {
-        return;
-    }
+  char *q;
 
-    if (arg_p->X_op == O_register || arg_p->X_op == O_md1) {
-        emit_mx(prefix, opcode, 0, arg_p);
-        return;
-    }
+  if (!arg_p) {
+    return;
+  }
 
-    if (arg_p->X_md) {
-        ill_op();
-        return;
+  switch (arg_p->X_op)
+    {
+    case O_register:
+    case O_md1:
+      emit_mx (prefix, opcode, 0, arg_p);
+      break;
+    default:
+      if (arg_p->X_md) {
+        ill_op ();
+      } else {
+        int size = prefix ? 2 : 1;
+        q = frag_more (size);
+        if (!q) {
+          return;
+        }
+        if (prefix) {
+          *q++ = prefix;
+        }
+        *q = opcode ^ 0x46;
+        emit_byte (arg_p, BFD_RELOC_8);
+      }
+      break;
     }
-
-    int size = prefix ? 2 : 1;
-    char *q = frag_more(size);
-    
-    if (q == NULL) {
-        return;
-    }
-    
-    if (prefix) {
-        *q++ = prefix;
-    }
-    
-    *q = opcode ^ 0x46;
-    emit_byte(arg_p, BFD_RELOC_8);
 }
 
 /* The operand s may be r, (hl), (ix+d), (iy+d), n.  */
@@ -1643,11 +1598,11 @@ emit_s (char prefix, char opcode, const char *args)
   expressionS arg_s;
   const char *p;
 
-  if (args == NULL)
+  if (!args)
     return NULL;
 
   p = parse_exp (args, &arg_s);
-  if (p == NULL)
+  if (!p)
     return NULL;
 
   if (*p == ',' && 
@@ -1658,15 +1613,13 @@ emit_s (char prefix, char opcode, const char *args)
       if (!(ins_ok & INS_EZ80) && !sdcc_compat)
         {
           ill_op ();
-          return p;
+          return NULL;
         }
       ++p;
-      const char *new_p = parse_exp (p, &arg_s);
-      if (new_p == NULL)
-        return p;
-      p = new_p;
+      p = parse_exp (p, &arg_s);
+      if (!p)
+        return NULL;
     }
-  
   emit_sx (prefix, opcode, &arg_s);
   return p;
 }
@@ -1679,27 +1632,29 @@ emit_sub (char prefix, char opcode, const char *args)
 
   if (!(ins_ok & INS_GBZ80))
     return emit_s (prefix, opcode, args);
-  
+
+  if (!args) {
+    error (_("bad instruction syntax"));
+    return args;
+  }
+
   p = parse_exp (args, &arg_s);
-  if (!p)
-    return p;
-    
-  if (*p != ',')
-    {
-      error (_("bad instruction syntax"));
-      return p + 1;
-    }
+  if (!p || *p != ',') {
+    error (_("bad instruction syntax"));
+    return p ? p : args;
+  }
   p++;
 
-  if (arg_s.X_md != 0 || arg_s.X_op != O_register || arg_s.X_add_number != REG_A)
-    {
-      ill_op ();
-      return p;
-    }
+  if (arg_s.X_md != 0 || arg_s.X_op != O_register || arg_s.X_add_number != REG_A) {
+    ill_op ();
+    return p;
+  }
 
   p = parse_exp (p, &arg_s);
-  if (!p)
-    return p;
+  if (!p) {
+    error (_("bad instruction syntax"));
+    return args;
+  }
 
   emit_sx (prefix, opcode, &arg_s);
   return p;
@@ -1716,52 +1671,53 @@ emit_swap (char prefix, char opcode, const char *args)
     return emit_mr (prefix, opcode, args);
 
   p = parse_exp (args, &reg);
-  
   if (reg.X_md != 0 || reg.X_op != O_register || reg.X_add_number != REG_A)
     {
       ill_op ();
-      return p;
+      return NULL;
     }
 
   q = frag_more (2);
   if (q == NULL)
-    return p;
+    return NULL;
     
   *q++ = 0xED;
   *q = 0x23;
-  
   return p;
 }
 
 static const char *
-emit_call (char prefix ATTRIBUTE_UNUSED, char opcode, const char * args)
+emit_call(char prefix ATTRIBUTE_UNUSED, char opcode, const char *args)
 {
-  expressionS addr;
-  const char *p;
-  char *q;
+    expressionS addr;
+    const char *p;
+    char *q;
 
-  if (args == NULL)
-    return NULL;
-
-  p = parse_exp_not_indexed (args, &addr);
-  
-  if (p == NULL)
-    return NULL;
-    
-  if (addr.X_md)
-    {
-      ill_op ();
-      return p;
+    if (!args) {
+        ill_op();
+        return NULL;
     }
-  
-  q = frag_more (1);
-  if (q == NULL)
+
+    p = parse_exp_not_indexed(args, &addr);
+    if (!p) {
+        ill_op();
+        return NULL;
+    }
+
+    if (addr.X_md) {
+        ill_op();
+        return p;
+    }
+
+    q = frag_more(1);
+    if (!q) {
+        ill_op();
+        return p;
+    }
+
+    *q = opcode;
+    emit_word(&addr);
     return p;
-    
-  *q = opcode;
-  emit_word (&addr);
-  
-  return p;
 }
 
 /* Operand may be rr, r, (hl), (ix+d), (iy+d).  */
@@ -1773,53 +1729,37 @@ emit_incdec (char prefix, char opcode, const char * args)
   const char *p;
   char *q;
 
-  p = parse_exp (args, &operand);
-  if (!p)
-    {
-      ill_op ();
-      return args;
-    }
+  if (args == NULL) {
+    ill_op();
+    return NULL;
+  }
 
-  if (operand.X_op == O_register && !operand.X_md)
-    {
-      rnum = operand.X_add_number;
-      if (!(R_ARITH & rnum))
-        {
-          emit_mx (0, opcode, 3, &operand);
-          return p;
-        }
+  p = parse_exp(args, &operand);
+  if (p == NULL) {
+    ill_op();
+    return NULL;
+  }
 
-      if (rnum & R_INDEX)
-        {
-          q = frag_more (2);
-          if (!q)
-            {
-              ill_op ();
-              return p;
-            }
-          *q++ = (rnum & R_IX) ? 0xDD : 0xFD;
-          *q = prefix + ((rnum & 3) << 4);
-        }
-      else
-        {
-          q = frag_more (1);
-          if (!q)
-            {
-              ill_op ();
-              return p;
-            }
-          *q = prefix + ((rnum & 3) << 4);
-        }
+  rnum = operand.X_add_number;
+  
+  if (!operand.X_md && operand.X_op == O_register && (R_ARITH & rnum)) {
+    int frag_size = (rnum & R_INDEX) ? 2 : 1;
+    q = frag_more(frag_size);
+    if (q == NULL) {
+      ill_op();
+      return NULL;
     }
-  else if (operand.X_op == O_md1 || operand.X_op == O_register)
-    {
-      emit_mx (0, opcode, 3, &operand);
+    
+    if (rnum & R_INDEX) {
+      *q++ = (rnum & R_IX) ? 0xDD : 0xFD;
     }
-  else
-    {
-      ill_op ();
-    }
-
+    *q = prefix + ((rnum & 3) << 4);
+  } else if (operand.X_op == O_md1 || operand.X_op == O_register) {
+    emit_mx(0, opcode, 3, &operand);
+  } else {
+    ill_op();
+  }
+  
   return p;
 }
 
@@ -1830,31 +1770,36 @@ emit_jr (char prefix ATTRIBUTE_UNUSED, char opcode, const char * args)
   const char *p;
   char *q;
 
-  if (args == NULL)
+  if (!args)
     {
       ill_op ();
-      return NULL;
+      return args;
     }
 
   p = parse_exp_not_indexed (args, &addr);
-  
+  if (!p)
+    {
+      ill_op ();
+      return args;
+    }
+
   if (addr.X_md)
     {
       ill_op ();
       return p;
     }
-  
+
   q = frag_more (1);
-  if (q == NULL)
+  if (!q)
     {
       ill_op ();
       return p;
     }
-  
+
   *q = opcode;
   addr.X_add_number--;
   emit_byte (&addr, BFD_RELOC_8_PCREL);
-  
+
   return p;
 }
 
@@ -1866,54 +1811,35 @@ emit_jp (char prefix, char opcode, const char * args)
   char *q;
   int rnum;
 
-  p = parse_exp_not_indexed (args, &addr);
-  
-  if (!p)
-    return NULL;
-    
+  p = parse_exp_not_indexed (args, & addr);
   if (!addr.X_md)
     {
       q = frag_more (1);
-      if (!q)
-        return NULL;
       *q = opcode;
-      emit_word (&addr);
+      emit_word (& addr);
       return p;
     }
 
   rnum = addr.X_add_number;
-  
-  if (addr.X_op == O_register)
+  if (addr.X_op == O_register && (rnum & ~R_INDEX) == REG_HL)
     {
-      if ((rnum & ~R_INDEX) == REG_HL)
-        {
-          int is_indexed = (rnum & R_INDEX) != 0;
-          int size = is_indexed ? 2 : 1;
-          
-          q = frag_more (size);
-          if (!q)
-            return NULL;
-            
-          if (is_indexed)
-            {
-              *q++ = (rnum & R_IX) ? 0xDD : 0xFD;
-            }
-          *q = prefix;
-          return p;
-        }
-      
-      if (rnum == REG_C && (ins_ok & INS_Z80N))
-        {
-          q = frag_more (2);
-          if (!q)
-            return NULL;
-          *q++ = 0xED;
-          *q = 0x98;
-          return p;
-        }
+      int fragment_size = (rnum & R_INDEX) ? 2 : 1;
+      q = frag_more (fragment_size);
+      if (rnum & R_INDEX)
+        *q++ = (rnum & R_IX) ? 0xDD : 0xFD;
+      *q = prefix;
+    }
+  else if (addr.X_op == O_register && rnum == REG_C && (ins_ok & INS_Z80N))
+    {
+      q = frag_more (2);
+      *q++ = 0xED;
+      *q = 0x98;
+    }
+  else
+    {
+      ill_op ();
     }
   
-  ill_op ();
   return p;
 }
 
@@ -1925,67 +1851,99 @@ emit_im (char prefix, char opcode, const char * args)
   char *q;
   int mode_value;
 
-  p = parse_exp (args, & mode);
-  if (p == NULL)
-    return NULL;
-    
+  if (!args)
+    {
+      ill_op ();
+      return NULL;
+    }
+
+  p = parse_exp (args, &mode);
+  if (!p)
+    {
+      ill_op ();
+      return NULL;
+    }
+
   if (mode.X_md || (mode.X_op != O_constant))
     {
       ill_op ();
       return p;
     }
 
-  mode_value = mode.X_add_number;
+  mode_value = (int)mode.X_add_number;
   
   if (mode_value == 1 || mode_value == 2)
     mode_value++;
   
-  if (mode_value != 0 && mode_value != 3)
+  if (mode_value < 0 || mode_value > 2)
     {
       ill_op ();
       return p;
     }
-  
+
   q = frag_more (2);
-  if (q == NULL)
-    return p;
-    
-  *q++ = prefix;
-  *q = opcode + (8 * mode_value);
-  
+  if (!q)
+    {
+      ill_op ();
+      return p;
+    }
+
+  *q = prefix;
+  *(q + 1) = opcode + 8 * mode_value;
+
   return p;
 }
 
 static const char *
-emit_pop (char prefix ATTRIBUTE_UNUSED, char opcode, const char * args)
+emit_pop (char prefix, char opcode, const char * args)
 {
   expressionS regp;
   const char *p;
   char *q;
   int rnum;
 
+  if (!args)
+    {
+      ill_op ();
+      return NULL;
+    }
+
   p = parse_exp (args, &regp);
-  
+  if (!p)
+    {
+      ill_op ();
+      return NULL;
+    }
+
   if (regp.X_md || regp.X_op != O_register || !(regp.X_add_number & R_STACKABLE))
-  {
-    ill_op ();
-    return p;
-  }
+    {
+      ill_op ();
+      return p;
+    }
 
   rnum = regp.X_add_number;
   
   if (rnum & R_INDEX)
-  {
-    q = frag_more (2);
-    *q++ = (rnum & R_IX) ? 0xDD : 0xFD;
-  }
+    {
+      q = frag_more (2);
+      if (!q)
+        {
+          ill_op ();
+          return p;
+        }
+      *q++ = (rnum & R_IX) ? 0xDD : 0xFD;
+    }
   else
-  {
-    q = frag_more (1);
-  }
+    {
+      q = frag_more (1);
+      if (!q)
+        {
+          ill_op ();
+          return p;
+        }
+    }
   
   *q = opcode + ((rnum & 3) << 4);
-
   return p;
 }
 
@@ -1996,34 +1954,28 @@ emit_push (char prefix, char opcode, const char * args)
   const char *p;
   char *q;
 
+  if (!args)
+    return args;
+
   p = parse_exp (args, &arg);
-  
+  if (!p)
+    return args;
+
   if (arg.X_op == O_register)
-    {
-      return emit_pop (prefix, opcode, args);
-    }
+    return emit_pop (prefix, opcode, args);
 
   if (arg.X_md || arg.X_op == O_md1 || !(ins_ok & INS_Z80N))
-    {
-      ill_op ();
-      return p;
-    }
+    ill_op ();
 
   q = frag_more (2);
   if (!q)
-    {
-      return p;
-    }
-  
-  q[0] = 0xED;
-  q[1] = 0x8A;
+    return args;
+  *q++ = 0xED;
+  *q = 0x8A;
 
   q = frag_more (2);
   if (!q)
-    {
-      return p;
-    }
-  
+    return args;
   fix_new_exp (frag_now, q - frag_now->fr_literal, 2, &arg, false,
                BFD_RELOC_Z80_16_BE);
 
@@ -2034,27 +1986,27 @@ static const char *
 emit_retcc (char prefix ATTRIBUTE_UNUSED, char opcode, const char * args)
 {
   char cc;
-  const char *p;
   char *q;
+  const char *p;
 
-  if (args == NULL) {
+  if (!args) {
     return NULL;
   }
 
   p = parse_cc (args, &cc);
   q = frag_more (1);
   
-  if (q == NULL) {
-    return args;
+  if (!q) {
+    return NULL;
   }
 
-  if (p != NULL) {
+  if (p) {
     *q = opcode + cc;
     return p;
+  } else {
+    *q = prefix;
+    return args;
   }
-  
-  *q = prefix;
-  return args;
 }
 
 static const char *
@@ -2072,40 +2024,35 @@ emit_adc (char prefix, char opcode, const char * args)
       return p;
     }
 
-  if ((term.X_md) || (term.X_op != O_register))
+  if (term.X_md || term.X_op != O_register)
     {
       ill_op ();
       return p;
     }
 
-  if (term.X_add_number == REG_A)
+  switch (term.X_add_number)
     {
-      return emit_s (0, prefix, p);
-    }
-
-  if (term.X_add_number != REG_HL)
-    {
+    case REG_A:
+      p = emit_s (0, prefix, p);
+      break;
+    case REG_HL:
+      p = parse_exp (p, &term);
+      if (!term.X_md && term.X_op == O_register)
+        {
+          rnum = term.X_add_number;
+          if (R_ARITH == (rnum & (R_ARITH | R_INDEX)))
+            {
+              q = frag_more (2);
+              *q++ = 0xED;
+              *q = opcode + ((rnum & 3) << 4);
+              break;
+            }
+        }
       ill_op ();
-      return p;
-    }
-
-  p = parse_exp (p, &term);
-  if ((term.X_md) || (term.X_op != O_register))
-    {
+      break;
+    default:
       ill_op ();
-      return p;
     }
-
-  rnum = term.X_add_number;
-  if (R_ARITH != (rnum & (R_ARITH | R_INDEX)))
-    {
-      ill_op ();
-      return p;
-    }
-
-  q = frag_more (2);
-  *q++ = 0xED;
-  *q = opcode + ((rnum & 3) << 4);
   return p;
 }
 
@@ -2124,19 +2071,17 @@ emit_add (char prefix, char opcode, const char * args)
       return p;
     }
 
-  if ((term.X_md) || (term.X_op != O_register))
+  if (term.X_md || term.X_op != O_register)
     {
       ill_op ();
       return p;
     }
 
-  lhs = term.X_add_number;
-
-  switch (lhs)
+  switch (term.X_add_number)
     {
     case REG_A:
       return emit_s (0, prefix, p);
-
+      
     case REG_SP:
       p = parse_exp (p, &term);
       if (!(ins_ok & INS_GBZ80) || term.X_md || term.X_op == O_register)
@@ -2148,7 +2093,7 @@ emit_add (char prefix, char opcode, const char * args)
       *q = 0xE8;
       emit_byte (&term, BFD_RELOC_Z80_DISP8);
       return p;
-
+      
     case REG_BC:
     case REG_DE:
       if (!(ins_ok & INS_Z80N))
@@ -2156,59 +2101,53 @@ emit_add (char prefix, char opcode, const char * args)
           ill_op ();
           return p;
         }
-      break;
-
+      /* Fall through */
     case REG_HL:
     case REG_IX:
     case REG_IY:
-      break;
-
+      lhs = term.X_add_number;
+      p = parse_exp (p, &term);
+      rhs = term.X_add_number;
+      
+      if (term.X_md != 0 || term.X_op == O_md1)
+        {
+          ill_op ();
+          return p;
+        }
+        
+      if (term.X_op == O_register && (rhs & R_ARITH) && 
+          (rhs == lhs || (rhs & ~R_INDEX) != REG_HL))
+        {
+          q = frag_more ((lhs & R_INDEX) ? 2 : 1);
+          if (lhs & R_INDEX)
+            *q++ = (lhs & R_IX) ? 0xDD : 0xFD;
+          *q = opcode + ((rhs & 3) << 4);
+          return p;
+        }
+        
+      if (!(lhs & R_INDEX) && (ins_ok & INS_Z80N))
+        {
+          if (term.X_op == O_register && rhs == REG_A)
+            {
+              q = frag_more (2);
+              *q++ = 0xED;
+              *q = 0x33 - (lhs & 3);
+              return p;
+            }
+          else if (term.X_op != O_register && term.X_op != O_md1)
+            {
+              q = frag_more (2);
+              *q++ = 0xED;
+              *q = 0x36 - (lhs & 3);
+              emit_word (&term);
+              return p;
+            }
+        }
+      /* Fall through */
     default:
       ill_op ();
       return p;
     }
-
-  p = parse_exp (p, &term);
-  rhs = term.X_add_number;
-
-  if (term.X_md != 0 || term.X_op == O_md1)
-    {
-      ill_op ();
-      return p;
-    }
-
-  if ((term.X_op == O_register) && (rhs & R_ARITH) && 
-      (rhs == lhs || (rhs & ~R_INDEX) != REG_HL))
-    {
-      q = frag_more ((lhs & R_INDEX) ? 2 : 1);
-      if (lhs & R_INDEX)
-        *q++ = (lhs & R_IX) ? 0xDD : 0xFD;
-      *q = opcode + ((rhs & 3) << 4);
-      return p;
-    }
-
-  if (!(lhs & R_INDEX) && (ins_ok & INS_Z80N))
-    {
-      if (term.X_op == O_register && rhs == REG_A)
-        {
-          q = frag_more (2);
-          *q++ = 0xED;
-          *q = 0x33 - (lhs & 3);
-          return p;
-        }
-      
-      if (term.X_op != O_register && term.X_op != O_md1)
-        {
-          q = frag_more (2);
-          *q++ = 0xED;
-          *q = 0x36 - (lhs & 3);
-          emit_word (&term);
-          return p;
-        }
-    }
-
-  ill_op ();
-  return p;
 }
 
 static const char *
@@ -2218,19 +2157,18 @@ emit_bit (char prefix, char opcode, const char * args)
   int bn;
   const char *p;
 
-  if (args == NULL)
+  if (!args)
     {
       ill_op ();
       return NULL;
     }
 
   p = parse_exp (args, &b);
-  if (p == NULL || *p != ',')
+  if (!p || *p != ',')
     {
       error (_("bad instruction syntax"));
       return NULL;
     }
-  
   p++;
 
   if (b.X_md || b.X_op != O_constant)
@@ -2247,13 +2185,9 @@ emit_bit (char prefix, char opcode, const char * args)
     }
 
   if (opcode == 0x40)
-    {
-      p = emit_m (prefix, opcode + (bn << 3), p);
-    }
+    p = emit_m (prefix, opcode + (bn << 3), p);
   else
-    {
-      p = emit_mr (prefix, opcode + (bn << 3), p);
-    }
+    p = emit_mr (prefix, opcode + (bn << 3), p);
 
   return p;
 }
@@ -2266,101 +2200,86 @@ emit_bshft (char prefix, char opcode, const char * args)
   const char *p;
   char *q;
 
-  if (!args)
-    {
-      error (_("bad instruction syntax"));
-      return args;
-    }
+  if (args == NULL)
+    return NULL;
 
   p = parse_exp (args, &r1);
-  if (!p || *p != ',')
+  if (p == NULL)
+    return NULL;
+  
+  if (*p != ',')
     {
       error (_("bad instruction syntax"));
-      return p;
+      return NULL;
     }
-  
   p++;
+  
   p = parse_exp (p, &r2);
-  
-  if (r1.X_md != 0 || 
-      r1.X_op != O_register || 
-      r1.X_add_number != REG_DE)
+  if (p == NULL)
+    return NULL;
+
+  if (r1.X_md != 0 || r1.X_op != O_register || r1.X_add_number != REG_DE ||
+      r2.X_md != 0 || r2.X_op != O_register || r2.X_add_number != REG_B)
     {
       ill_op ();
-      return p;
+      return NULL;
     }
-  
-  if (r2.X_md != 0 || 
-      r2.X_op != O_register || 
-      r2.X_add_number != REG_B)
-    {
-      ill_op ();
-      return p;
-    }
-  
+
   q = frag_more (2);
-  if (!q)
-    {
-      error (_("memory allocation failed"));
-      return p;
-    }
-  
-  q[0] = prefix;
-  q[1] = opcode;
+  if (q == NULL)
+    return NULL;
+
+  *q = prefix;
+  *(q + 1) = opcode;
   
   return p;
 }
 
-static const char *emit_jpcc(char prefix, char opcode, const char *args)
+static const char *
+emit_jpcc(char prefix, char opcode, const char *args)
 {
-    if (!args) {
+    char cc;
+    const char *p;
+
+    if (args == NULL) {
         return NULL;
     }
 
-    char cc;
-    const char *p = parse_cc(args, &cc);
-    
-    if (!p) {
-        return (prefix == (char)0xC3) 
-            ? emit_jp(0xE9, prefix, args)
-            : emit_call(0, prefix, args);
+    p = parse_cc(args, &cc);
+    if (p != NULL && *p == ',') {
+        p++;
+        p = emit_call(0, opcode + cc, p);
+    } else {
+        if (prefix == 0xC3) {
+            p = emit_jp(0xE9, prefix, args);
+        } else {
+            p = emit_call(0, prefix, args);
+        }
     }
-    
-    if (*p != ',') {
-        return (prefix == (char)0xC3)
-            ? emit_jp(0xE9, prefix, args)
-            : emit_call(0, prefix, args);
-    }
-    
-    p++;
-    return emit_call(0, opcode + cc, p);
+    return p;
 }
 
-static const char *emit_jrcc(char prefix, char opcode, const char *args)
+static const char *
+emit_jrcc (char prefix, char opcode, const char * args)
 {
-    if (!args) {
-        return NULL;
-    }
+  char cc;
+  const char *p;
 
-    char cc = 0;
-    const char *p = parse_cc(args, &cc);
-    
-    if (!p) {
-        return emit_jr(0, prefix, args);
+  if (!args)
+    return NULL;
+
+  p = parse_cc (args, &cc);
+  if (p && *p++ == ',')
+    {
+      if (cc > 24)
+	error (_("condition code invalid for jr"));
+      else
+	p = emit_jr (0, opcode + cc, p);
     }
-    
-    if (*p != ',') {
-        return emit_jr(0, prefix, args);
-    }
-    
-    p++;
-    
-    if (cc > 24) {
-        error(_("condition code invalid for jr"));
-        return NULL;
-    }
-    
-    return emit_jr(0, opcode + cc, p);
+  else
+    p = emit_jr (0, prefix, args);
+
+  return p;
 }
 
 static const char *
@@ -2372,79 +2291,74 @@ emit_ex (char prefix_in ATTRIBUTE_UNUSED,
   char prefix = 0;
   char opcode = 0;
 
-  p = parse_exp_not_indexed (args, &op);
-  if (!p)
+  if (!args) {
+    ill_op();
     return args;
-    
+  }
+
+  p = parse_exp_not_indexed (args, &op);
+  if (!p) {
+    ill_op();
+    return args;
+  }
+
   p = skip_space (p);
-  if (!p || *p != ',')
-    {
-      error (_("bad instruction syntax"));
-      return p ? p + 1 : args;
-    }
+  if (*p != ',') {
+    error (_("bad instruction syntax"));
+    return p;
+  }
   p++;
 
-  if (op.X_op != O_register)
-    {
-      ill_op ();
-      return p;
-    }
-
-  int reg_value = op.X_add_number | (op.X_md ? 0x8000 : 0);
-  
-  switch (reg_value)
-    {
-    case REG_AF:
-      if (p[0] && TOLOWER (p[0]) == 'a' && 
-          p[1] && TOLOWER (p[1]) == 'f')
-        {
+  if (op.X_op == O_register) {
+    int reg_value = op.X_add_number | (op.X_md ? 0x8000 : 0);
+    
+    switch (reg_value) {
+      case REG_AF:
+        if (p[0] && p[1] && 
+            TOLOWER(p[0]) == 'a' && TOLOWER(p[1]) == 'f') {
           p += 2;
-          if (*p == '`')
+          if (*p == '`') {
             p++;
+          }
           opcode = 0x08;
         }
-      break;
-      
-    case REG_DE:
-      if (p[0] && TOLOWER (p[0]) == 'h' && 
-          p[1] && TOLOWER (p[1]) == 'l')
-        {
+        break;
+        
+      case REG_DE:
+        if (p[0] && p[1] && 
+            TOLOWER(p[0]) == 'h' && TOLOWER(p[1]) == 'l') {
           p += 2;
           opcode = 0xEB;
         }
-      break;
-      
-    case (REG_SP | 0x8000):
-      {
-        const char *temp_p = parse_exp (p, &op);
-        if (temp_p && 
-            op.X_op == O_register &&
-            op.X_md == 0 &&
-            (op.X_add_number & ~R_INDEX) == REG_HL)
-          {
-            p = temp_p;
+        break;
+        
+      case REG_SP|0x8000:
+        p = parse_exp (p, &op);
+        if (p && op.X_op == O_register && op.X_md == 0) {
+          int reg_num = op.X_add_number & ~R_INDEX;
+          if (reg_num == REG_HL) {
             opcode = 0xE3;
-            if (R_INDEX & op.X_add_number)
+            if (R_INDEX & op.X_add_number) {
               prefix = (R_IX & op.X_add_number) ? 0xDD : 0xFD;
+            }
           }
-      }
-      break;
-      
-    default:
-      break;
+        }
+        break;
     }
+  }
 
-  if (opcode)
+  if (opcode) {
     emit_insn (prefix, opcode, p);
-  else
+  } else {
     ill_op ();
+  }
 
   return p;
 }
 
 static const char *
 emit_in (char prefix ATTRIBUTE_UNUSED, char opcode ATTRIBUTE_UNUSED,
-	const char * args)
+    const char * args)
 {
   expressionS reg, port;
   const char *p;
@@ -2460,65 +2374,57 @@ emit_in (char prefix ATTRIBUTE_UNUSED, char opcode ATTRIBUTE_UNUSED,
   else
     {
       if (*p++ != ',')
-	{
-	  error (_("bad instruction syntax"));
-	  return p;
-	}
-      p = parse_exp (p, &port);
-    }
-  
-  if (!reg.X_md || reg.X_op != O_register)
-    {
-      ill_op ();
-      return p;
-    }
-    
-  if (reg.X_add_number > 7 && reg.X_add_number != REG_F)
-    {
-      ill_op ();
-      return p;
-    }
-    
-  if (!port.X_md)
-    {
-      ill_op ();
-      return p;
-    }
-    
-  if (port.X_op != O_md1 && port.X_op != O_register)
-    {
-      if (reg.X_add_number != REG_A)
         {
-          ill_op ();
+          error (_("bad instruction syntax"));
           return p;
         }
-      q = frag_more (1);
-      *q = 0xDB;
-      emit_byte (&port, BFD_RELOC_8);
+      p = parse_exp (p, &port);
+    }
+
+  if (reg.X_md != 0 || reg.X_op != O_register ||
+      (reg.X_add_number > 7 && reg.X_add_number != REG_F) ||
+      !port.X_md)
+    {
+      ill_op ();
       return p;
     }
-    
+
+  if (port.X_op != O_md1 && port.X_op != O_register)
+    {
+      if (reg.X_add_number == REG_A)
+        {
+          q = frag_more (1);
+          *q = 0xDB;
+          emit_byte (&port, BFD_RELOC_8);
+        }
+      else
+        {
+          ill_op ();
+        }
+      return p;
+    }
+
   if (port.X_add_number != REG_C && port.X_add_number != REG_BC)
     {
       ill_op ();
       return p;
     }
-    
+
   if (port.X_add_number == REG_BC && !(ins_ok & INS_EZ80))
     {
       ill_op ();
       return p;
     }
-    
+
   if (reg.X_add_number == REG_F && !(ins_ok & (INS_R800|INS_Z80N)))
     {
       check_mach (INS_IN_F_C);
     }
-    
+
   q = frag_more (2);
   *q++ = 0xED;
-  *q = 0x40 | ((reg.X_add_number & 7) << 3);
-  
+  *q = 0x40|((reg.X_add_number&7)<<3);
+
   return p;
 }
 
@@ -2531,16 +2437,17 @@ emit_in0 (char prefix ATTRIBUTE_UNUSED, char opcode ATTRIBUTE_UNUSED,
   char *q;
 
   p = parse_exp (args, &reg);
-  if (*p++ != ',')
+  if (*p != ',')
     {
       error (_("bad instruction syntax"));
-      return p;
+      return args;
     }
+  p++;
 
   p = parse_exp (p, &port);
   
-  if (reg.X_md != 0 || 
-      reg.X_op != O_register || 
+  if (reg.X_md != 0 ||
+      reg.X_op != O_register ||
       reg.X_add_number > 7 ||
       !port.X_md ||
       port.X_op == O_md1 ||
@@ -2552,7 +2459,7 @@ emit_in0 (char prefix ATTRIBUTE_UNUSED, char opcode ATTRIBUTE_UNUSED,
 
   q = frag_more (2);
   *q++ = 0xED;
-  *q = 0x00 | (reg.X_add_number << 3);
+  *q = (char)(0x00 | (reg.X_add_number << 3));
   emit_byte (&port, BFD_RELOC_8);
   
   return p;
@@ -2560,7 +2467,7 @@ emit_in0 (char prefix ATTRIBUTE_UNUSED, char opcode ATTRIBUTE_UNUSED,
 
 static const char *
 emit_out (char prefix ATTRIBUTE_UNUSED, char opcode ATTRIBUTE_UNUSED,
-	 const char * args)
+         const char * args)
 {
   expressionS reg, port;
   const char *p;
@@ -2574,13 +2481,12 @@ emit_out (char prefix ATTRIBUTE_UNUSED, char opcode ATTRIBUTE_UNUSED,
     }
   
   p = parse_exp (p, &reg);
-  
   if (!port.X_md)
     {
       ill_op ();
       return p;
     }
-  
+
   if (reg.X_op == O_constant && reg.X_add_number == 0)
     {
       if (!(ins_ok & INS_Z80N))
@@ -2588,13 +2494,13 @@ emit_out (char prefix ATTRIBUTE_UNUSED, char opcode ATTRIBUTE_UNUSED,
       reg.X_op = O_register;
       reg.X_add_number = 6;
     }
-  
+
   if (reg.X_md || reg.X_op != O_register || reg.X_add_number > 7)
     {
       ill_op ();
       return p;
     }
-  
+
   if (port.X_op != O_register && port.X_op != O_md1)
     {
       if (REG_A == reg.X_add_number)
@@ -2607,19 +2513,76 @@ emit_out (char prefix ATTRIBUTE_UNUSED, char opcode ATTRIBUTE_UNUSED,
         {
           ill_op ();
         }
-      return p;
     }
-  
-  if (REG_C == port.X_add_number || port.X_add_number == REG_BC)
+  else
     {
-      if (port.X_add_number == REG_BC && !(ins_ok & INS_EZ80))
+      if (REG_C == port.X_add_number || port.X_add_number == REG_BC)
+        {
+          if (port.X_add_number == REG_BC && !(ins_ok & INS_EZ80))
+            {
+              ill_op ();
+              return p;
+            }
+          q = frag_more (2);
+          *q++ = 0xED;
+          *q = 0x41 | (reg.X_add_number << 3);
+        }
+      else
         {
           ill_op ();
-          return p;
         }
+    }
+  return p;
+}
+
+static const char *
+emit_out0 (char prefix ATTRIBUTE_UNUSED, char opcode ATTRIBUTE_UNUSED,
+         const char * args)
+{
+  expressionS reg, port;
+  const char *p;
+  char *q;
+
+  if (!args)
+    {
+      ill_op ();
+      return args;
+    }
+
+  p = parse_exp (args, &port);
+  if (!p || *p != ',')
+    {
+      error (_("bad instruction syntax"));
+      return p ? p + 1 : args;
+    }
+  p++;
+
+  p = parse_exp (p, &reg);
+  if (!p)
+    {
+      ill_op ();
+      return args;
+    }
+
+  if (port.X_md != 0
+      && port.X_op != O_register
+      && port.X_op != O_md1
+      && reg.X_md == 0
+      && reg.X_op == O_register
+      && reg.X_add_number >= 0
+      && reg.X_add_number <= 7)
+    {
       q = frag_more (2);
-      *q++ = 0xED;
-      *q = 0x41 | (reg.X_add_number << 3);
+      if (q)
+        {
+          *q++ = 0xED;
+          *q = 0x01 | (reg.X_add_number << 3);
+          emit_byte (&port, BFD_RELOC_8);
+        }
+      else
+        {
+          ill_op ();
+        }
     }
   else
     {
@@ -2627,45 +2590,6 @@ emit_out (char prefix ATTRIBUTE_UNUSED, char opcode ATTRIBUTE_UNUSED,
     }
   
   return p;
-}
-
-static const char *
-emit_out0(char prefix ATTRIBUTE_UNUSED, char opcode ATTRIBUTE_UNUSED,
-          const char *args)
-{
-    expressionS reg, port;
-    const char *p;
-    char *q;
-
-    p = parse_exp(args, &port);
-    if (*p++ != ',') {
-        error(_("bad instruction syntax"));
-        return p;
-    }
-
-    p = parse_exp(p, &reg);
-    
-    if (!is_valid_out0_instruction(&port, &reg)) {
-        ill_op();
-        return p;
-    }
-
-    q = frag_more(2);
-    *q++ = 0xED;
-    *q = 0x01 | (reg.X_add_number << 3);
-    emit_byte(&port, BFD_RELOC_8);
-    
-    return p;
-}
-
-static int is_valid_out0_instruction(const expressionS *port, const expressionS *reg)
-{
-    return port->X_md != 0 &&
-           port->X_op != O_register &&
-           port->X_op != O_md1 &&
-           reg->X_md == 0 &&
-           reg->X_op == O_register &&
-           reg->X_add_number <= 7;
 }
 
 static const char *
@@ -2674,34 +2598,34 @@ emit_rst (char prefix ATTRIBUTE_UNUSED, char opcode, const char * args)
   expressionS addr;
   const char *p;
   char *q;
-  const int RST_MASK = 0x38;
-  const int RST_INVALID_MASK = ~RST_MASK;
+  long rst_address;
 
-  p = parse_exp_not_indexed (args, &addr);
-  if (p == NULL)
+  if (!args)
     {
-      return NULL;
+      error ("rst instruction requires an address argument");
+      return args;
     }
 
+  p = parse_exp_not_indexed (args, &addr);
   if (addr.X_op != O_constant)
     {
       error ("rst needs constant address");
       return p;
     }
 
-  if (addr.X_add_number & RST_INVALID_MASK)
+  rst_address = addr.X_add_number;
+  if ((rst_address & ~0x38) != 0)
     {
       ill_op ();
       return p;
     }
 
   q = frag_more (1);
-  if (q == NULL)
+  if (q)
     {
-      return p;
+      *q = opcode + (rst_address & 0x38);
     }
-
-  *q = opcode + (addr.X_add_number & RST_MASK);
+  
   return p;
 }
 
@@ -2710,40 +2634,45 @@ static void
 emit_ld_m_n (expressionS *dst, expressionS *src)
 {
   char *q;
-  char prefix;
+  char prefix = 0x00;
   expressionS dst_offset;
+  int instruction_length;
+
+  if (!dst || !src)
+    {
+      ill_op ();
+      return;
+    }
 
   switch (dst->X_add_number)
     {
-    case REG_HL: 
-      prefix = 0x00; 
+    case REG_HL:
+      prefix = 0x00;
       break;
-    case REG_IX: 
-      prefix = 0xDD; 
+    case REG_IX:
+      prefix = 0xDD;
       break;
-    case REG_IY: 
-      prefix = 0xFD; 
+    case REG_IY:
+      prefix = 0xFD;
       break;
     default:
       ill_op ();
       return;
     }
 
-  if (prefix != 0x00)
+  instruction_length = prefix ? 2 : 1;
+  q = frag_more (instruction_length);
+  
+  if (prefix)
+    *q++ = prefix;
+  *q = 0x36;
+
+  if (prefix)
     {
-      q = frag_more (2);
-      *q++ = prefix;
-      *q = 0x36;
-      
       dst_offset = *dst;
       dst_offset.X_op = O_symbol;
       dst_offset.X_add_number = 0;
       emit_byte (&dst_offset, BFD_RELOC_Z80_DISP8);
-    }
-  else
-    {
-      q = frag_more (1);
-      *q = 0x36;
     }
   
   emit_byte (src, BFD_RELOC_8);
@@ -2757,60 +2686,78 @@ emit_ld_m_r (expressionS *dst, expressionS *src)
   char prefix = 0;
   expressionS dst_offset;
 
-  if (dst->X_op == O_md1)
+  if (!dst || !src) {
+    ill_op();
+    return;
+  }
+
+  switch (dst->X_op)
     {
-      if (ins_ok & INS_GBZ80)
-        {
-          if (src->X_op == O_register && src->X_add_number == REG_A)
-            {
-              *frag_more (1) = (dst->X_add_number == REG_HL) ? 0x22 : 0x32;
-              return;
-            }
-          ill_op ();
+    case O_md1:
+      if (ins_ok & INS_GBZ80) {
+        if (src->X_op != O_register || src->X_add_number != REG_A) {
+          ill_op();
           return;
         }
+        *frag_more (1) = (dst->X_add_number == REG_HL) ? 0x22 : 0x32;
+        return;
+      }
       prefix = (dst->X_add_number == REG_IX) ? 0xDD : 0xFD;
+      /* Fall through */
+    case O_register:
+      if (emit_register_load(dst, src, prefix)) {
+        return;
+      }
+      break;
+    default:
+      if (src->X_add_number == REG_A) {
+        q = frag_more (1);
+        *q = (ins_ok & INS_GBZ80) ? 0xEA : 0x32;
+        emit_word (dst);
+        return;
+      }
+      break;
     }
+  ill_op();
+}
 
-  if (dst->X_op == O_md1 || dst->X_op == O_register)
-    {
-      if (dst->X_add_number == REG_BC || dst->X_add_number == REG_DE)
-        {
-          if (src->X_add_number == REG_A)
-            {
-              q = frag_more (1);
-              *q = 0x02 | ((dst->X_add_number & 3) << 4);
-              return;
-            }
+static int
+emit_register_load(expressionS *dst, expressionS *src, char prefix)
+{
+  char *q;
+  expressionS dst_offset;
+
+  switch (dst->X_add_number) {
+    case REG_BC:
+    case REG_DE:
+      if (src->X_add_number == REG_A) {
+        q = frag_more(1);
+        *q = 0x02 | ((dst->X_add_number & 3) << 4);
+        return 1;
+      }
+      break;
+    case REG_IX:
+    case REG_IY:
+    case REG_HL:
+      if (src->X_add_number <= 7) {
+        q = frag_more(prefix ? 2 : 1);
+        if (prefix) {
+          *q++ = prefix;
         }
-      else if (dst->X_add_number == REG_IX || dst->X_add_number == REG_IY || dst->X_add_number == REG_HL)
-        {
-          if (src->X_add_number <= 7)
-            {
-              q = frag_more (prefix ? 2 : 1);
-              if (prefix)
-                *q++ = prefix;
-              *q = 0x70 | src->X_add_number;
-              if (prefix)
-                {
-                  dst_offset = *dst;
-                  dst_offset.X_op = O_symbol;
-                  dst_offset.X_add_number = 0;
-                  emit_byte (&dst_offset, BFD_RELOC_Z80_DISP8);
-                }
-              return;
-            }
+        *q = 0x70 | src->X_add_number;
+        if (prefix) {
+          dst_offset = *dst;
+          dst_offset.X_op = O_symbol;
+          dst_offset.X_add_number = 0;
+          emit_byte(&dst_offset, BFD_RELOC_Z80_DISP8);
         }
-    }
-  else if (src->X_add_number == REG_A)
-    {
-      q = frag_more (1);
-      *q = (ins_ok & INS_GBZ80) ? 0xEA : 0x32;
-      emit_word (dst);
-      return;
-    }
-  
-  ill_op ();
+        return 1;
+      }
+      break;
+    default:
+      break;
+  }
+  return 0;
 }
 
 /* For 16-bit load register to memory instructions: LD (<expression>),rr.  */
@@ -2822,116 +2769,95 @@ emit_ld_m_rr (expressionS *dst, expressionS *src)
   int opcode = 0;
   expressionS dst_offset;
 
-  if (dst->X_op == O_md1 || dst->X_op == O_register)
+  if (!dst || !src) {
+    ill_op();
+    return;
+  }
+
+  switch (dst->X_op)
     {
-      if (!(ins_ok & INS_EZ80))
-        {
-          ill_op ();
-          return;
-        }
+    case O_md1:
+    case O_register:
+      if (!(ins_ok & INS_EZ80)) {
+        ill_op();
+        return;
+      }
       
       switch (dst->X_add_number)
         {
-        case REG_IX: 
-          prefix = 0xDD; 
-          break;
-        case REG_IY: 
-          prefix = 0xFD; 
-          break;
-        case REG_HL: 
-          prefix = 0xED; 
-          break;
+        case REG_IX: prefix = 0xDD; break;
+        case REG_IY: prefix = 0xFD; break;
+        case REG_HL: prefix = 0xED; break;
         default:
-          ill_op ();
+          ill_op();
           return;
         }
       
       switch (src->X_add_number)
         {
-        case REG_BC: 
-          opcode = 0x0F; 
-          break;
-        case REG_DE: 
-          opcode = 0x1F; 
-          break;
-        case REG_HL: 
-          opcode = 0x2F; 
-          break;
-        case REG_IX: 
-          opcode = (prefix != 0xFD) ? 0x3F : 0x3E; 
-          break;
-        case REG_IY: 
-          opcode = (prefix != 0xFD) ? 0x3E : 0x3F; 
-          break;
+        case REG_BC: opcode = 0x0F; break;
+        case REG_DE: opcode = 0x1F; break;
+        case REG_HL: opcode = 0x2F; break;
+        case REG_IX: opcode = (prefix != 0xFD) ? 0x3F : 0x3E; break;
+        case REG_IY: opcode = (prefix != 0xFD) ? 0x3E : 0x3F; break;
         default:
-          ill_op ();
+          ill_op();
           return;
         }
       
-      q = frag_more (prefix ? 2 : 1);
-      if (prefix)
+      q = frag_more(prefix ? 2 : 1);
+      if (!q) {
+        return;
+      }
+      
+      if (prefix) {
         *q++ = prefix;
+      }
       *q = opcode;
       
-      if (prefix == 0xFD || prefix == 0xDD)
-        {
-          dst_offset = *dst;
-          dst_offset.X_op = O_symbol;
-          dst_offset.X_add_number = 0;
-          emit_byte (&dst_offset, BFD_RELOC_Z80_DISP8);
-        }
-    }
-  else
-    {
-      if (ins_ok & INS_GBZ80)
-        {
-          if (src->X_add_number != REG_SP)
-            {
-              ill_op ();
-              return;
-            }
+      if (prefix == 0xFD || prefix == 0xDD) {
+        dst_offset = *dst;
+        dst_offset.X_op = O_symbol;
+        dst_offset.X_add_number = 0;
+        emit_byte(&dst_offset, BFD_RELOC_Z80_DISP8);
+      }
+      break;
+      
+    default:
+      if (ins_ok & INS_GBZ80) {
+        if (src->X_add_number == REG_SP) {
           prefix = 0x00;
           opcode = 0x08;
+        } else {
+          ill_op();
+          return;
         }
-      else
-        {
-          switch (src->X_add_number)
-            {
-            case REG_BC: 
-              prefix = 0xED; 
-              opcode = 0x43; 
-              break;
-            case REG_DE: 
-              prefix = 0xED; 
-              opcode = 0x53; 
-              break;
-            case REG_HL: 
-              prefix = 0x00; 
-              opcode = 0x22; 
-              break;
-            case REG_IX: 
-              prefix = 0xDD; 
-              opcode = 0x22; 
-              break;
-            case REG_IY: 
-              prefix = 0xFD; 
-              opcode = 0x22; 
-              break;
-            case REG_SP: 
-              prefix = 0xED; 
-              opcode = 0x73; 
-              break;
-            default:
-              ill_op ();
-              return;
-            }
-        }
+      } else {
+        switch (src->X_add_number)
+          {
+          case REG_BC: prefix = 0xED; opcode = 0x43; break;
+          case REG_DE: prefix = 0xED; opcode = 0x53; break;
+          case REG_HL: prefix = 0x00; opcode = 0x22; break;
+          case REG_IX: prefix = 0xDD; opcode = 0x22; break;
+          case REG_IY: prefix = 0xFD; opcode = 0x22; break;
+          case REG_SP: prefix = 0xED; opcode = 0x73; break;
+          default:
+            ill_op();
+            return;
+          }
+      }
       
-      q = frag_more (prefix ? 2 : 1);
-      if (prefix)
+      q = frag_more(prefix ? 2 : 1);
+      if (!q) {
+        return;
+      }
+      
+      if (prefix) {
         *q++ = prefix;
+      }
       *q = opcode;
-      emit_word (dst);
+      emit_word(dst);
+      break;
     }
 }
 
@@ -2945,84 +2871,81 @@ emit_ld_r_m (expressionS *dst, expressionS *src)
 
   if (dst->X_add_number == REG_A && src->X_op == O_register)
     {
-      if (src->X_add_number == REG_BC)
-        opcode = 0x0A;
-      else if (src->X_add_number == REG_DE)
-        opcode = 0x1A;
-      
+      switch (src->X_add_number)
+        {
+        case REG_BC: 
+          opcode = 0x0A; 
+          break;
+        case REG_DE: 
+          opcode = 0x1A; 
+          break;
+        default: 
+          break;
+        }
       if (opcode != 0)
         {
           q = frag_more (1);
-          if (q != NULL)
-            *q = opcode;
+          *q = opcode;
           return;
         }
     }
 
-  if (src->X_op == O_md1)
+  switch (src->X_op)
     {
-      if ((ins_ok & INS_GBZ80) != 0)
+    case O_md1:
+      if (ins_ok & INS_GBZ80)
         {
           if (dst->X_op == O_register && dst->X_add_number == REG_A)
             {
-              q = frag_more (1);
-              if (q != NULL)
-                *q = (src->X_add_number == REG_HL) ? 0x2A : 0x3A;
+              *frag_more (1) = (src->X_add_number == REG_HL) ? 0x2A : 0x3A;
             }
           else
             {
               ill_op ();
             }
-          return;
+          break;
         }
-      src->X_op = O_register;
-    }
-
-  if (src->X_op == O_register)
-    {
+    case O_register:
       if (dst->X_add_number > 7)
         {
           ill_op ();
           return;
         }
-      
       opcode = 0x46;
-      
-      if (src->X_add_number == REG_HL)
-        prefix = 0x00;
-      else if (src->X_add_number == REG_IX)
-        prefix = 0xDD;
-      else if (src->X_add_number == REG_IY)
-        prefix = 0xFD;
-      else
+      switch (src->X_add_number)
         {
+        case REG_HL: 
+          prefix = 0x00; 
+          break;
+        case REG_IX: 
+          prefix = 0xDD; 
+          break;
+        case REG_IY: 
+          prefix = 0xFD; 
+          break;
+        default:
           ill_op ();
           return;
         }
-      
       q = frag_more (prefix ? 2 : 1);
-      if (q == NULL)
-        return;
-        
       if (prefix)
-        *q++ = prefix;
+        {
+          *q++ = prefix;
+        }
       *q = opcode | ((dst->X_add_number & 7) << 3);
-      
       if (prefix)
         {
           src_offset = *src;
           src_offset.X_op = O_symbol;
           src_offset.X_add_number = 0;
-          emit_byte (&src_offset, BFD_RELOC_Z80_DISP8);
+          emit_byte (& src_offset, BFD_RELOC_Z80_DISP8);
         }
-    }
-  else
-    {
+      break;
+    default:
       if (dst->X_add_number == REG_A)
         {
           q = frag_more (1);
-          if (q != NULL)
-            *q = ((ins_ok & INS_GBZ80) != 0) ? 0xFA : 0x3A;
+          *q = (ins_ok & INS_GBZ80) ? 0xFA : 0x3A;
           emit_word (src);
         }
       else
@@ -3039,17 +2962,21 @@ emit_ld_r_n (expressionS *dst, expressionS *src)
   char prefix = 0;
   int reg_num = dst->X_add_number;
 
-  if (reg_num == (REG_H | R_IX) || reg_num == (REG_L | R_IX))
+  if ((reg_num == (REG_H|R_IX)) || (reg_num == (REG_L|R_IX)))
     {
       prefix = 0xDD;
     }
-  else if (reg_num == (REG_H | R_IY) || reg_num == (REG_L | R_IY))
+  else if ((reg_num == (REG_H|R_IY)) || (reg_num == (REG_L|R_IY)))
     {
       prefix = 0xFD;
     }
-  else if (reg_num != REG_A && reg_num != REG_B && reg_num != REG_C &&
-           reg_num != REG_D && reg_num != REG_E && reg_num != REG_H &&
-           reg_num != REG_L)
+  else if (reg_num == REG_A || reg_num == REG_B || reg_num == REG_C || 
+           reg_num == REG_D || reg_num == REG_E || reg_num == REG_H || 
+           reg_num == REG_L)
+    {
+      prefix = 0;
+    }
+  else
     {
       ill_op ();
       return;
@@ -3063,7 +2990,7 @@ emit_ld_r_n (expressionS *dst, expressionS *src)
           ill_op ();
           return;
         }
-      if (!(ins_ok & (INS_EZ80 | INS_R800 | INS_Z80N)))
+      else if (!(ins_ok & (INS_EZ80|INS_R800|INS_Z80N)))
         {
           check_mach (INS_IDX_HALF);
         }
@@ -3081,129 +3008,168 @@ emit_ld_r_r (expressionS *dst, expressionS *src)
   int opcode = 0;
   int ii_halves = 0;
 
-  if (!dst || !src) {
-    ill_op();
-    return;
-  }
+  if (!dst || !src)
+    {
+      ill_op();
+      return;
+    }
 
-  if (dst->X_add_number == REG_SP) {
-    handle_ld_sp_src(src, &prefix, &opcode);
-  } else if (dst->X_add_number == REG_HL) {
-    handle_ld_hl_src(src, &prefix, &opcode);
-  } else if (dst->X_add_number == REG_I) {
-    handle_ld_i_src(src, &prefix, &opcode);
-  } else if (dst->X_add_number == REG_MB) {
-    handle_ld_mb_src(src, &prefix, &opcode);
-  } else if (dst->X_add_number == REG_R) {
-    handle_ld_r_src(src, &prefix, &opcode);
-  } else if (dst->X_add_number == REG_A) {
-    handle_ld_a_src(src, &prefix, &opcode);
-  } else {
-    handle_ld_general_dst(dst, &prefix, &ii_halves);
-  }
+  if (handle_special_dst_registers(dst, src, &prefix, &opcode))
+    {
+      /* Special case handled */
+    }
+  else if (handle_standard_dst_registers(dst, src, &prefix, &opcode, &ii_halves))
+    {
+      /* Standard case handled */
+    }
+  else
+    {
+      ill_op();
+      return;
+    }
 
-  if (opcode == 0) {
-    compute_opcode(dst, src, &prefix, &opcode, &ii_halves);
-  }
+  if (opcode == 0)
+    {
+      if (!handle_standard_src_registers(dst, src, &prefix, &opcode, &ii_halves))
+        {
+          ill_op();
+          return;
+        }
+    }
 
-  validate_and_emit(prefix, opcode, ii_halves);
+  validate_instruction_compatibility(prefix, ii_halves, opcode);
+
+  q = frag_more(prefix ? 2 : 1);
+  if (prefix)
+    *q++ = prefix;
+  *q = opcode;
 }
 
-static void handle_ld_sp_src(expressionS *src, int *prefix, int *opcode)
+static int
+handle_special_dst_registers(expressionS *dst, expressionS *src, int *prefix, int *opcode)
 {
-  switch (src->X_add_number) {
+  switch (dst->X_add_number)
+    {
+    case REG_SP:
+      return handle_sp_dst(src, prefix, opcode);
+    case REG_HL:
+      return handle_hl_dst(src, prefix, opcode);
+    case REG_I:
+      return handle_i_dst(src, prefix, opcode);
+    case REG_MB:
+      return handle_mb_dst(src, prefix, opcode);
+    case REG_R:
+      return handle_r_dst(src, prefix, opcode);
+    case REG_A:
+      return handle_a_dst(src, prefix, opcode);
+    default:
+      return 0;
+    }
+}
+
+static int
+handle_sp_dst(expressionS *src, int *prefix, int *opcode)
+{
+  switch (src->X_add_number)
+    {
     case REG_HL: *prefix = 0x00; break;
     case REG_IX: *prefix = 0xDD; break;
     case REG_IY: *prefix = 0xFD; break;
-    default: ill_op(); return;
-  }
+    default:
+      return 0;
+    }
   *opcode = 0xF9;
+  return 1;
 }
 
-static void handle_ld_hl_src(expressionS *src, int *prefix, int *opcode)
+static int
+handle_hl_dst(expressionS *src, int *prefix, int *opcode)
 {
-  if (!(ins_ok & INS_EZ80) || src->X_add_number != REG_I) {
-    ill_op();
-    return;
-  }
-  if (cpu_mode < 1) {
+  if (!(ins_ok & INS_EZ80) || src->X_add_number != REG_I)
+    return 0;
+  if (cpu_mode < 1)
     error(_("ADL mode instruction"));
-    return;
-  }
   *prefix = 0xED;
   *opcode = 0xD7;
+  return 1;
 }
 
-static void handle_ld_i_src(expressionS *src, int *prefix, int *opcode)
+static int
+handle_i_dst(expressionS *src, int *prefix, int *opcode)
 {
-  if (src->X_add_number == REG_HL) {
-    if (!(ins_ok & INS_EZ80)) {
-      ill_op();
-      return;
+  if (src->X_add_number == REG_HL)
+    {
+      if (!(ins_ok & INS_EZ80))
+        return 0;
+      if (cpu_mode < 1)
+        error(_("ADL mode instruction"));
+      *prefix = 0xED;
+      *opcode = 0xC7;
     }
-    if (cpu_mode < 1) {
-      error(_("ADL mode instruction"));
-      return;
+  else if (src->X_add_number == REG_A)
+    {
+      *prefix = 0xED;
+      *opcode = 0x47;
     }
-    *prefix = 0xED;
-    *opcode = 0xC7;
-  } else if (src->X_add_number == REG_A) {
-    *prefix = 0xED;
-    *opcode = 0x47;
-  } else {
-    ill_op();
-  }
+  else
+    return 0;
+  return 1;
 }
 
-static void handle_ld_mb_src(expressionS *src, int *prefix, int *opcode)
+static int
+handle_mb_dst(expressionS *src, int *prefix, int *opcode)
 {
-  if (!(ins_ok & INS_EZ80) || src->X_add_number != REG_A) {
-    ill_op();
-    return;
-  }
-  if (cpu_mode < 1) {
+  if (!(ins_ok & INS_EZ80) || src->X_add_number != REG_A)
+    return 0;
+  if (cpu_mode < 1)
     error(_("ADL mode instruction"));
-    return;
-  }
   *prefix = 0xED;
   *opcode = 0x6D;
+  return 1;
 }
 
-static void handle_ld_r_src(expressionS *src, int *prefix, int *opcode)
+static int
+handle_r_dst(expressionS *src, int *prefix, int *opcode)
 {
-  if (src->X_add_number == REG_A) {
-    *prefix = 0xED;
-    *opcode = 0x4F;
-  } else {
-    ill_op();
-  }
+  if (src->X_add_number != REG_A)
+    return 0;
+  *prefix = 0xED;
+  *opcode = 0x4F;
+  return 1;
 }
 
-static void handle_ld_a_src(expressionS *src, int *prefix, int *opcode)
+static int
+handle_a_dst(expressionS *src, int *prefix, int *opcode)
 {
-  if (src->X_add_number == REG_I) {
-    *prefix = 0xED;
-    *opcode = 0x57;
-  } else if (src->X_add_number == REG_R) {
-    *prefix = 0xED;
-    *opcode = 0x5F;
-  } else if (src->X_add_number == REG_MB) {
-    if (!(ins_ok & INS_EZ80)) {
-      ill_op();
-      return;
+  switch (src->X_add_number)
+    {
+    case REG_I:
+      *prefix = 0xED;
+      *opcode = 0x57;
+      return 1;
+    case REG_R:
+      *prefix = 0xED;
+      *opcode = 0x5F;
+      return 1;
+    case REG_MB:
+      if (!(ins_ok & INS_EZ80))
+        return 0;
+      if (cpu_mode < 1)
+        error(_("ADL mode instruction"));
+      *prefix = 0xED;
+      *opcode = 0x6E;
+      return 1;
+    default:
+      return 0;
     }
-    if (cpu_mode < 1) {
-      error(_("ADL mode instruction"));
-      return;
-    }
-    *prefix = 0xED;
-    *opcode = 0x6E;
-  }
 }
 
-static void handle_ld_general_dst(expressionS *dst, int *prefix, int *ii_halves)
+static int
+handle_standard_dst_registers(expressionS *dst, expressionS *src, int *prefix, int *opcode, int *ii_halves)
 {
-  switch (dst->X_add_number) {
+  switch (dst->X_add_number)
+    {
+    case REG_A:
     case REG_B:
     case REG_C:
     case REG_D:
@@ -3211,25 +3177,27 @@ static void handle_ld_general_dst(expressionS *dst, int *prefix, int *ii_halves)
     case REG_H:
     case REG_L:
       *prefix = 0x00;
-      break;
+      return 1;
     case REG_H|R_IX:
     case REG_L|R_IX:
       *prefix = 0xDD;
       *ii_halves = 1;
-      break;
+      return 1;
     case REG_H|R_IY:
     case REG_L|R_IY:
       *prefix = 0xFD;
       *ii_halves = 1;
-      break;
+      return 1;
     default:
-      ill_op();
-  }
+      return 0;
+    }
 }
 
-static void compute_opcode(expressionS *dst, expressionS *src, int *prefix, int *opcode, int *ii_halves)
+static int
+handle_standard_src_registers(expressionS *dst, expressionS *src, int *prefix, int *opcode, int *ii_halves)
 {
-  switch (src->X_add_number) {
+  switch (src->X_add_number)
+    {
     case REG_A:
     case REG_B:
     case REG_C:
@@ -3238,68 +3206,58 @@ static void compute_opcode(expressionS *dst, expressionS *src, int *prefix, int 
       break;
     case REG_H:
     case REG_L:
-      if (*prefix != 0) {
-        ill_op();
-        return;
-      }
+      if (*prefix != 0)
+        return 0;
       break;
     case REG_H|R_IX:
     case REG_L|R_IX:
-      if (*prefix == 0xFD || dst->X_add_number == REG_H || dst->X_add_number == REG_L) {
-        ill_op();
-        return;
-      }
+      if (*prefix == 0xFD || dst->X_add_number == REG_H || dst->X_add_number == REG_L)
+        return 0;
       *prefix = 0xDD;
       *ii_halves = 1;
       break;
     case REG_H|R_IY:
     case REG_L|R_IY:
-      if (*prefix == 0xDD || dst->X_add_number == REG_H || dst->X_add_number == REG_L) {
-        ill_op();
-        return;
-      }
+      if (*prefix == 0xDD || dst->X_add_number == REG_H || dst->X_add_number == REG_L)
+        return 0;
       *prefix = 0xFD;
       *ii_halves = 1;
       break;
     default:
-      ill_op();
-      return;
-  }
+      return 0;
+    }
   *opcode = 0x40 + ((dst->X_add_number & 7) << 3) + (src->X_add_number & 7);
+  return 1;
 }
 
-static void validate_and_emit(int prefix, int opcode, int ii_halves)
+static void
+validate_instruction_compatibility(int prefix, int ii_halves, int opcode)
 {
-  char *q;
-  
-  if ((ins_ok & INS_GBZ80) && prefix != 0) {
+  if ((ins_ok & INS_GBZ80) && prefix != 0)
     ill_op();
-    return;
-  }
-  
-  if (ii_halves && !(ins_ok & (INS_EZ80|INS_R800|INS_Z80N))) {
+    
+  if (ii_halves && !(ins_ok & (INS_EZ80|INS_R800|INS_Z80N)))
     check_mach(INS_IDX_HALF);
-  }
-  
-  if (prefix == 0 && (ins_ok & INS_EZ80)) {
-    switch (opcode) {
-      case 0x40:
-      case 0x49:
-      case 0x52:
-      case 0x5B:
-        as_warn(_("unsupported instruction, assembled as NOP"));
-        opcode = 0x00;
-        break;
-      default:
-        break;
+    
+  if (prefix == 0 && (ins_ok & INS_EZ80))
+    handle_ez80_warnings(&opcode);
+}
+
+static void
+handle_ez80_warnings(int *opcode)
+{
+  switch (*opcode)
+    {
+    case 0x40:
+    case 0x49:
+    case 0x52:
+    case 0x5B:
+      as_warn(_("unsupported instruction, assembled as NOP"));
+      *opcode = 0x00;
+      break;
+    default:
+      break;
     }
-  }
-  
-  q = frag_more(prefix ? 2 : 1);
-  if (prefix) {
-    *q++ = prefix;
-  }
-  *q = opcode;
 }
 
 static void
@@ -3311,91 +3269,59 @@ emit_ld_rr_m (expressionS *dst, expressionS *src)
   expressionS src_offset;
 
   if (ins_ok & INS_GBZ80)
-    {
-      ill_op ();
-      return;
-    }
+    ill_op ();
 
-  if (src->X_op == O_md1 || src->X_op == O_register)
+  switch (src->X_op)
     {
+    case O_md1:
+      prefix = (src->X_add_number == REG_IX) ? 0xDD : 0xFD;
+    case O_register:
       if (!(ins_ok & INS_EZ80))
-        {
-          ill_op ();
-          return;
-        }
-
-      if (src->X_op == O_md1)
-        prefix = (src->X_add_number == REG_IX) ? 0xDD : 0xFD;
-      else
-        prefix = 0xED;
-
+        ill_op ();
+      
+      prefix = (src->X_op == O_register) ? 0xED : prefix;
+      
       switch (dst->X_add_number)
         {
-        case REG_BC:
-          opcode = 0x07;
+        case REG_BC: opcode = 0x07; break;
+        case REG_DE: opcode = 0x17; break;
+        case REG_HL: opcode = 0x27; break;
+        case REG_IX: 
+          opcode = (prefix == 0xED || prefix == 0xDD) ? 0x37 : 0x31; 
           break;
-        case REG_DE:
-          opcode = 0x17;
-          break;
-        case REG_HL:
-          opcode = 0x27;
-          break;
-        case REG_IX:
-          opcode = (prefix == 0xED || prefix == 0xDD) ? 0x37 : 0x31;
-          break;
-        case REG_IY:
-          opcode = (prefix == 0xED || prefix == 0xDD) ? 0x31 : 0x37;
+        case REG_IY: 
+          opcode = (prefix == 0xED || prefix == 0xDD) ? 0x31 : 0x37; 
           break;
         default:
           ill_op ();
-          return;
         }
-
+      
       q = frag_more (2);
       *q++ = prefix;
       *q = opcode;
-
+      
       if (prefix != 0xED)
         {
           src_offset = *src;
           src_offset.X_op = O_symbol;
           src_offset.X_add_number = 0;
-          emit_byte (&src_offset, BFD_RELOC_Z80_DISP8);
+          emit_byte (& src_offset, BFD_RELOC_Z80_DISP8);
         }
-    }
-  else
-    {
+      break;
+      
+    default:
       switch (dst->X_add_number)
         {
-        case REG_BC:
-          prefix = 0xED;
-          opcode = 0x4B;
-          break;
-        case REG_DE:
-          prefix = 0xED;
-          opcode = 0x5B;
-          break;
-        case REG_HL:
-          prefix = 0x00;
-          opcode = 0x2A;
-          break;
-        case REG_SP:
-          prefix = 0xED;
-          opcode = 0x7B;
-          break;
-        case REG_IX:
-          prefix = 0xDD;
-          opcode = 0x2A;
-          break;
-        case REG_IY:
-          prefix = 0xFD;
-          opcode = 0x2A;
-          break;
+        case REG_BC: prefix = 0xED; opcode = 0x4B; break;
+        case REG_DE: prefix = 0xED; opcode = 0x5B; break;
+        case REG_HL: prefix = 0x00; opcode = 0x2A; break;
+        case REG_SP: prefix = 0xED; opcode = 0x7B; break;
+        case REG_IX: prefix = 0xDD; opcode = 0x2A; break;
+        case REG_IY: prefix = 0xFD; opcode = 0x2A; break;
         default:
           ill_op ();
-          return;
         }
-
+      
       q = frag_more (prefix ? 2 : 1);
       if (prefix)
         *q++ = prefix;
@@ -3409,23 +3335,25 @@ emit_ld_rr_nn (expressionS *dst, expressionS *src)
 {
   char *q;
   int prefix = 0x00;
-  int opcode = 0x21;
+  int opcode;
   
-  if (dst == NULL || src == NULL)
-    {
-      ill_op ();
-      return;
-    }
+  if (!dst || !src) {
+    ill_op();
+    return;
+  }
   
   switch (dst->X_add_number)
     {
     case REG_IX:
       prefix = 0xDD;
+      opcode = 0x21;
       break;
     case REG_IY:
       prefix = 0xFD;
+      opcode = 0x21;
       break;
     case REG_HL:
+      opcode = 0x21;
       break;
     case REG_BC:
     case REG_DE:
@@ -3433,33 +3361,26 @@ emit_ld_rr_nn (expressionS *dst, expressionS *src)
       opcode = 0x01 + ((dst->X_add_number & 3) << 4);
       break;
     default:
-      ill_op ();
+      ill_op();
       return;
     }
   
-  if (prefix != 0x00 && (ins_ok & INS_GBZ80))
-    {
-      ill_op ();
-      return;
-    }
+  if (prefix && (ins_ok & INS_GBZ80)) {
+    ill_op();
+    return;
+  }
   
-  int size = (prefix != 0x00) ? 2 : 1;
-  q = frag_more (size);
+  q = frag_more(prefix ? 2 : 1);
+  if (!q) {
+    ill_op();
+    return;
+  }
   
-  if (q == NULL)
-    {
-      ill_op ();
-      return;
-    }
-  
-  if (prefix != 0x00)
-    {
-      *q = prefix;
-      q++;
-    }
-  
+  if (prefix) {
+    *q++ = prefix;
+  }
   *q = opcode;
-  emit_word (src);
+  emit_word(src);
 }
 
 static const char *
@@ -3469,18 +3390,33 @@ emit_ld (char prefix_in ATTRIBUTE_UNUSED, char opcode_in ATTRIBUTE_UNUSED,
   expressionS dst, src;
   const char *p;
 
+  if (args == NULL)
+    {
+      ill_op ();
+      return args;
+    }
+
   p = parse_exp (args, & dst);
-  if (*p++ != ',')
-    error (_("bad instruction syntax"));
+  if (p == NULL || *p++ != ',')
+    {
+      error (_("bad instruction syntax"));
+      return args;
+    }
+  
   p = parse_exp (p, & src);
+  if (p == NULL)
+    {
+      error (_("bad instruction syntax"));
+      return args;
+    }
 
   if (dst.X_md)
     {
-      emit_ld_to_memory(&dst, &src);
+      emit_ld_memory_destination(&dst, &src);
     }
   else if (dst.X_op == O_register)
     {
-      emit_ld_to_register(&dst, &src);
+      emit_ld_register_destination(&dst, &src);
     }
   else
     {
@@ -3490,7 +3426,8 @@ emit_ld (char prefix_in ATTRIBUTE_UNUSED, char opcode_in ATTRIBUTE_UNUSED,
   return p;
 }
 
-static void emit_ld_to_memory(expressionS *dst, expressionS *src)
+static void
+emit_ld_memory_destination(expressionS *dst, expressionS *src)
 {
   if (src->X_op == O_register)
     {
@@ -3505,7 +3442,8 @@ static void emit_ld_to_memory(expressionS *dst, expressionS *src)
     }
 }
 
-static void emit_ld_to_register(expressionS *dst, expressionS *src)
+static void
+emit_ld_register_destination(expressionS *dst, expressionS *src)
 {
   if (src->X_md)
     {
@@ -3534,55 +3472,45 @@ emit_lddldi (char prefix, char opcode, const char * args)
   expressionS dst, src;
   const char *p;
   char *q;
-  char new_opcode;
 
   if (!(ins_ok & INS_GBZ80))
     return emit_insn (prefix, opcode, args);
 
-  p = parse_exp (args, &dst);
-  if (!p || *p != ',')
+  p = parse_exp (args, & dst);
+  if (*p++ != ',')
     {
       error (_("bad instruction syntax"));
-      return p;
+      return args;
     }
   
-  p++;
-  p = parse_exp (p, &src);
-  if (!p)
-    return p;
+  p = parse_exp (p, & src);
 
   if (dst.X_op != O_register || src.X_op != O_register)
     {
       ill_op ();
-      return p;
+      return args;
     }
 
-  new_opcode = ((opcode & 0x08) << 1) | 0x22;
+  opcode = (opcode & 0x08) * 2 + 0x22;
 
-  if (dst.X_md != 0 && 
-      dst.X_add_number == REG_HL && 
-      src.X_md == 0 && 
-      src.X_add_number == REG_A)
+  if (dst.X_md != 0 && dst.X_add_number == REG_HL && 
+      src.X_md == 0 && src.X_add_number == REG_A)
     {
-      new_opcode |= 0x00;
+      opcode |= 0x00;
     }
-  else if (dst.X_md == 0 && 
-           dst.X_add_number == REG_A && 
-           src.X_md != 0 && 
-           src.X_add_number == REG_HL)
+  else if (dst.X_md == 0 && dst.X_add_number == REG_A && 
+           src.X_md != 0 && src.X_add_number == REG_HL)
     {
-      new_opcode |= 0x08;
+      opcode |= 0x08;
     }
   else
     {
       ill_op ();
-      return p;
+      return args;
     }
 
   q = frag_more (1);
-  if (q)
-    *q = new_opcode;
-    
+  *q = opcode;
   return p;
 }
 
@@ -3592,6 +3520,7 @@ emit_ldh (char prefix ATTRIBUTE_UNUSED, char opcode ATTRIBUTE_UNUSED,
 {
   expressionS dst, src;
   const char *p;
+  char *q;
 
   p = parse_exp (args, & dst);
   if (*p++ != ',')
@@ -3602,47 +3531,13 @@ emit_ldh (char prefix ATTRIBUTE_UNUSED, char opcode ATTRIBUTE_UNUSED,
 
   p = parse_exp (p, & src);
   
-  if (dst.X_md == 0 && dst.X_op == O_register && dst.X_add_number == REG_A)
+  if (is_register_a_destination(&dst) && is_valid_source(&src))
     {
-      if (src.X_md == 0 || src.X_op == O_md1)
-        {
-          ill_op ();
-          return p;
-        }
-      
-      if (src.X_op == O_register)
-        {
-          if (src.X_add_number == REG_C)
-            *frag_more (1) = 0xF2;
-          else
-            ill_op ();
-        }
-      else
-        {
-          *frag_more (1) = 0xF0;
-          emit_byte (& src, BFD_RELOC_8);
-        }
+      handle_register_a_destination(&src);
     }
-  else if (src.X_md == 0 && src.X_op == O_register && src.X_add_number == REG_A)
+  else if (is_register_a_source(&src) && is_valid_destination(&dst))
     {
-      if (dst.X_md == 0 || dst.X_op == O_md1)
-        {
-          ill_op ();
-          return p;
-        }
-      
-      if (dst.X_op == O_register)
-        {
-          if (dst.X_add_number == REG_C)
-            *frag_more (1) = 0xE2;
-          else
-            ill_op ();
-        }
-      else
-        {
-          *frag_more (1) = 0xE0;
-          emit_byte (& dst, BFD_RELOC_8);
-        }
+      handle_register_a_source(&dst);
     }
   else
     {
@@ -3652,6 +3547,80 @@ emit_ldh (char prefix ATTRIBUTE_UNUSED, char opcode ATTRIBUTE_UNUSED,
   return p;
 }
 
+static int
+is_register_a_destination(const expressionS *exp)
+{
+  return exp->X_md == 0 
+         && exp->X_op == O_register 
+         && exp->X_add_number == REG_A;
+}
+
+static int
+is_valid_source(const expressionS *exp)
+{
+  return exp->X_md != 0 && exp->X_op != O_md1;
+}
+
+static int
+is_register_a_source(const expressionS *exp)
+{
+  return exp->X_md == 0 
+         && exp->X_op == O_register 
+         && exp->X_add_number == REG_A;
+}
+
+static int
+is_valid_destination(const expressionS *exp)
+{
+  return exp->X_md != 0 && exp->X_op != O_md1;
+}
+
+static void
+handle_register_a_destination(const expressionS *src)
+{
+  char *q;
+  
+  if (src->X_op != O_register)
+    {
+      q = frag_more (1);
+      *q = 0xF0;
+      emit_byte (src, BFD_RELOC_8);
+    }
+  else if (src->X_add_number == REG_C)
+    {
+      *frag_more (1) = 0xF2;
+    }
+  else
+    {
+      ill_op ();
+    }
+}
+
+static void
+handle_register_a_source(const expressionS *dst)
+{
+  char *q;
+  
+  if (dst->X_op == O_register)
+    {
+      if (dst->X_add_number == REG_C)
+        {
+          q = frag_more (1);
+          *q = 0xE2;
+        }
+      else
+        {
+          ill_op ();
+        }
+    }
+  else
+    {
+      q = frag_more (1);
+      *q = 0xE0;
+      emit_byte (dst, BFD_RELOC_8);
+    }
+}
+
 static const char *
 emit_ldhl (char prefix ATTRIBUTE_UNUSED, char opcode, const char * args)
 {
@@ -3659,21 +3628,27 @@ emit_ldhl (char prefix ATTRIBUTE_UNUSED, char opcode, const char * args)
   const char *p;
   char *q;
   
-  p = parse_exp (args, &dst);
-  if (p == NULL)
-    return NULL;
-    
-  if (*p != ',')
+  if (!args)
     {
       error (_("bad instruction syntax"));
-      return p + (*p != '\0');
+      return args;
+    }
+  
+  p = parse_exp (args, &dst);
+  if (!p || *p != ',')
+    {
+      error (_("bad instruction syntax"));
+      return p ? p : args;
     }
   p++;
 
   p = parse_exp (p, &src);
-  if (p == NULL)
-    return NULL;
-    
+  if (!p)
+    {
+      error (_("bad instruction syntax"));
+      return args;
+    }
+  
   if (dst.X_md != 0 || 
       dst.X_op != O_register || 
       dst.X_add_number != REG_SP ||
@@ -3684,14 +3659,16 @@ emit_ldhl (char prefix ATTRIBUTE_UNUSED, char opcode, const char * args)
       ill_op ();
       return p;
     }
-    
+  
   q = frag_more (1);
-  if (q == NULL)
-    return NULL;
-    
+  if (!q)
+    {
+      error (_("memory allocation failed"));
+      return p;
+    }
+  
   *q = opcode;
   emit_byte (&src, BFD_RELOC_Z80_DISP8);
-  
   return p;
 }
 
@@ -3704,23 +3681,20 @@ parse_lea_pea_args (const char * args, expressionS *op)
     return NULL;
     
   p = parse_exp (args, op);
-  
   if (!p)
     return NULL;
     
-  if (!sdcc_compat || *p != ',' || op->X_op != O_register)
-    return p;
-    
-  expressionS off;
-  const char *next_p = parse_exp (p + 1, &off);
-  
-  if (!next_p)
-    return p;
-    
-  op->X_op = O_add;
-  op->X_add_symbol = make_expr_symbol (&off);
-  
-  return next_p;
+  if (sdcc_compat && *p == ',' && op->X_op == O_register)
+    {
+      expressionS off;
+      p = parse_exp (p + 1, &off);
+      if (!p)
+        return NULL;
+        
+      op->X_op = O_add;
+      op->X_add_symbol = make_expr_symbol (&off);
+    }
+  return p;
 }
 
 static const char *
@@ -3729,19 +3703,19 @@ emit_lea (char prefix, char opcode, const char * args)
   expressionS dst, src;
   const char *p;
   char *q;
-  int rnum;
+  int dst_reg, src_reg;
 
-  p = parse_exp (args, & dst);
+  p = parse_exp (args, &dst);
   if (dst.X_md != 0 || dst.X_op != O_register)
     ill_op ();
 
-  rnum = dst.X_add_number;
-  switch (rnum)
+  dst_reg = dst.X_add_number;
+  switch (dst_reg)
     {
     case REG_BC:
     case REG_DE:
     case REG_HL:
-      opcode = 0x02 | ((rnum & 0x03) << 4);
+      opcode = 0x02 | ((dst_reg & 0x03) << 4);
       break;
     case REG_IX:
       opcode = 0x32;
@@ -3753,44 +3727,53 @@ emit_lea (char prefix, char opcode, const char * args)
       ill_op ();
     }
 
-  if (*p++ != ',')
-    error (_("bad instruction syntax"));
+  if (*p != ',')
+    {
+      error (_("bad instruction syntax"));
+      return NULL;
+    }
+  p++;
 
-  p = parse_lea_pea_args (p, & src);
-  if (src.X_md != 0)
+  p = parse_lea_pea_args (p, &src);
+  if (src.X_md != 0 || (src.X_op != O_add && src.X_op != O_register))
     ill_op ();
 
-  rnum = src.X_add_number;
+  src_reg = src.X_add_number;
   if (src.X_op == O_register)
     {
-      src.X_add_symbol = zero;
       src.X_op = O_add;
-    }
-  else if (src.X_op != O_add)
-    {
-      ill_op ();
+      src.X_add_symbol = zero;
     }
 
-  if (rnum == REG_IX)
+  if (src.X_op != O_add)
+    ill_op ();
+
+  switch (src_reg)
     {
+    case REG_IX:
       if (opcode == 0x33)
         opcode = 0x55;
-    }
-  else if (rnum == REG_IY)
-    {
+      break;
+    case REG_IY:
       if (opcode == 0x32)
         opcode = 0x54;
+      else if (opcode == 0x33)
+        opcode = 0x33;
       else
         opcode |= 0x01;
+      break;
     }
 
   q = frag_more (2);
+  if (q == NULL)
+    return NULL;
+  
   *q++ = prefix;
   *q = opcode;
 
   src.X_op = O_symbol;
   src.X_add_number = 0;
-  emit_byte (& src, BFD_RELOC_Z80_DISP8);
+  emit_byte (&src, BFD_RELOC_Z80_DISP8);
 
   return p;
 }
@@ -3802,18 +3785,24 @@ emit_mlt (char prefix, char opcode, const char * args)
   const char *p;
   char *q;
 
-  p = parse_exp (args, &arg);
-  
+  if (!args)
+    {
+      ill_op ();
+      return NULL;
+    }
+
+  p = parse_exp (args, & arg);
   if (arg.X_md != 0 || arg.X_op != O_register || !(arg.X_add_number & R_ARITH))
     {
       ill_op ();
-      return p;
+      return NULL;
     }
 
   q = frag_more (2);
   if (!q)
     {
-      return p;
+      ill_op ();
+      return NULL;
     }
 
   if (ins_ok & INS_Z80N)
@@ -3821,15 +3810,15 @@ emit_mlt (char prefix, char opcode, const char * args)
       if (arg.X_add_number != REG_DE)
         {
           ill_op ();
-          return p;
+          return NULL;
         }
-      q[0] = 0xED;
-      q[1] = 0x30;
+      *q++ = 0xED;
+      *q = 0x30;
     }
   else
     {
-      q[0] = prefix;
-      q[1] = opcode | ((arg.X_add_number & 3) << 4);
+      *q++ = prefix;
+      *q = opcode | ((arg.X_add_number & 3) << 4);
     }
 
   return p;
@@ -3846,142 +3835,136 @@ emit_mul (char prefix, char opcode, const char * args)
   if (args == NULL)
     {
       error (_("bad instruction syntax"));
-      return NULL;
+      return args;
     }
 
   p = parse_exp (args, &r1);
   if (p == NULL || *p != ',')
     {
       error (_("bad instruction syntax"));
-      return p;
+      return args;
     }
-  
   p++;
+
   p = parse_exp (p, &r2);
   if (p == NULL)
     {
       error (_("bad instruction syntax"));
-      return NULL;
+      return args;
     }
 
   if (r1.X_md != 0 || r1.X_op != O_register || r1.X_add_number != REG_D)
     {
       ill_op ();
-      return p;
+      return args;
     }
 
   if (r2.X_md != 0 || r2.X_op != O_register || r2.X_add_number != REG_E)
     {
       ill_op ();
-      return p;
+      return args;
     }
 
   q = frag_more (2);
   if (q == NULL)
     {
       error (_("memory allocation failed"));
-      return p;
+      return args;
     }
 
-  *q++ = prefix;
-  *q = opcode;
+  *q = prefix;
+  *(q + 1) = opcode;
 
   return p;
 }
 
 static const char *
-emit_nextreg (char prefix, char opcode ATTRIBUTE_UNUSED, const char * args)
+emit_nextreg(char prefix, char opcode ATTRIBUTE_UNUSED, const char *args)
 {
-  expressionS rr, nn;
-  const char *p;
-  char *q;
+    expressionS rr, nn;
+    const char *p;
+    char *q;
 
-  p = parse_exp (args, &rr);
-  if (*p++ != ',')
-    error (_("bad instruction syntax"));
-  
-  p = parse_exp (p, &nn);
-  
-  if (rr.X_md != 0 || rr.X_op == O_register || rr.X_op == O_md1)
-    ill_op ();
-    
-  if (nn.X_md != 0 || nn.X_op == O_md1)
-    ill_op ();
-  
-  q = frag_more (2);
-  *q++ = prefix;
-  emit_byte (&rr, BFD_RELOC_8);
-  
-  if (nn.X_op == O_register)
-    {
-      if (nn.X_add_number == REG_A)
-        {
-          *q = 0x92;
-        }
-      else
-        {
-          ill_op ();
-        }
+    if (!args) {
+        ill_op();
+        return NULL;
     }
-  else
-    {
-      *q = 0x91;
-      emit_byte (&nn, BFD_RELOC_8);
+
+    p = parse_exp(args, &rr);
+    if (!p || *p != ',') {
+        error(_("bad instruction syntax"));
+        return NULL;
     }
-  
-  return p;
+    p++;
+
+    p = parse_exp(p, &nn);
+    if (!p) {
+        error(_("bad instruction syntax"));
+        return NULL;
+    }
+
+    if (rr.X_md != 0 || rr.X_op == O_register || rr.X_op == O_md1 ||
+        nn.X_md != 0 || nn.X_op == O_md1) {
+        ill_op();
+        return NULL;
+    }
+
+    q = frag_more(2);
+    if (!q) {
+        return NULL;
+    }
+
+    *q++ = prefix;
+    emit_byte(&rr, BFD_RELOC_8);
+
+    if (nn.X_op == O_register && nn.X_add_number == REG_A) {
+        *q = 0x92;
+    } else if (nn.X_op != O_register) {
+        *q = 0x91;
+        emit_byte(&nn, BFD_RELOC_8);
+    } else {
+        ill_op();
+        return NULL;
+    }
+
+    return p;
 }
 
 static const char *
-emit_pea (char prefix, char opcode, const char * args)
+emit_pea (char prefix, char opcode, const char *args)
 {
   expressionS arg;
   const char *p;
   char *q;
 
-  p = parse_lea_pea_args (args, &arg);
-  
-  if (p == NULL)
-    {
-      ill_op ();
-      return NULL;
-    }
-  
-  if (arg.X_md != 0)
-    {
-      ill_op ();
-      return p;
-    }
-  
-  if (arg.X_op != O_add)
-    {
-      ill_op ();
-      return p;
-    }
-  
-  if (!(arg.X_add_number & R_INDEX))
-    {
-      ill_op ();
-      return p;
-    }
+  if (!args) {
+    ill_op();
+    return args;
+  }
 
-  q = frag_more (2);
-  if (q == NULL)
-    {
-      return p;
-    }
-  
+  p = parse_lea_pea_args(args, &arg);
+  if (!p) {
+    ill_op();
+    return args;
+  }
+
+  if (arg.X_md != 0 || arg.X_op != O_add || !(arg.X_add_number & R_INDEX)) {
+    ill_op();
+    return p;
+  }
+
+  q = frag_more(2);
+  if (!q) {
+    ill_op();
+    return p;
+  }
+
   *q++ = prefix;
-  *q = opcode;
-  
-  if (arg.X_add_number == REG_IY)
-    {
-      *q = opcode + 1;
-    }
+  *q = opcode + ((arg.X_add_number == REG_IY) ? 1 : 0);
 
   arg.X_op = O_symbol;
   arg.X_add_number = 0;
-  emit_byte (&arg, BFD_RELOC_Z80_DISP8);
+  emit_byte(&arg, BFD_RELOC_Z80_DISP8);
 
   return p;
 }
@@ -3990,9 +3973,7 @@ static const char *
 emit_reti (char prefix, char opcode, const char * args)
 {
   if ((ins_ok & INS_GBZ80) != 0)
-    {
-      return emit_insn (0x00, 0xD9, args);
-    }
+    return emit_insn (0x00, 0xD9, args);
 
   return emit_insn (prefix, opcode, args);
 }
@@ -4006,26 +3987,25 @@ emit_tst (char prefix, char opcode, const char *args)
   int rnum;
 
   p = parse_exp (args, &arg_s);
-  
   if (*p == ',' && arg_s.X_md == 0 && arg_s.X_op == O_register && arg_s.X_add_number == REG_A)
     {
-      if ((ins_ok & INS_EZ80) == 0)
+      if (!(ins_ok & INS_EZ80))
         {
           ill_op ();
           return p;
         }
       ++p;
       p = parse_exp (p, &arg_s);
+      if (!p)
+        return args;
     }
 
-  if (arg_s.X_op == O_md1)
+  switch (arg_s.X_op)
     {
+    case O_md1:
       ill_op ();
       return p;
-    }
-
-  if (arg_s.X_op == O_register)
-    {
+    case O_register:
       rnum = arg_s.X_add_number;
       if (arg_s.X_md != 0)
         {
@@ -4037,35 +4017,32 @@ emit_tst (char prefix, char opcode, const char *args)
           rnum = 6;
         }
       q = frag_more (2);
-      if (q == NULL)
+      if (!q)
         return p;
       *q++ = prefix;
       *q = opcode | (rnum << 3);
-      return p;
+      break;
+    default:
+      if (arg_s.X_md)
+        {
+          ill_op ();
+          return p;
+        }
+      q = frag_more (2);
+      if (!q)
+        return p;
+      if (ins_ok & INS_Z80N)
+        {
+          *q++ = 0xED;
+          *q = 0x27;
+        }
+      else
+        {
+          *q++ = prefix;
+          *q = opcode | 0x60;
+        }
+      emit_byte (&arg_s, BFD_RELOC_8);
     }
-
-  if (arg_s.X_md)
-    {
-      ill_op ();
-      return p;
-    }
-    
-  q = frag_more (2);
-  if (q == NULL)
-    return p;
-    
-  if ((ins_ok & INS_Z80N) != 0)
-    {
-      *q++ = 0xED;
-      *q = 0x27;
-    }
-  else
-    {
-      *q++ = prefix;
-      *q = opcode | 0x60;
-    }
-  emit_byte (&arg_s, BFD_RELOC_8);
-  
   return p;
 }
 
@@ -4077,35 +4054,27 @@ emit_insn_n (char prefix, char opcode, const char *args)
   char *q;
 
   if (!args)
-    {
-      ill_op ();
-      return NULL;
-    }
+    return NULL;
 
-  p = parse_exp (args, &arg);
+  p = parse_exp (args, & arg);
   if (!p)
-    {
-      ill_op ();
-      return NULL;
-    }
+    return NULL;
 
   if (arg.X_md || arg.X_op == O_register || arg.X_op == O_md1)
     {
       ill_op ();
-      return p;
+      return NULL;
     }
 
   q = frag_more (2);
   if (!q)
-    {
-      ill_op ();
-      return p;
-    }
+    return NULL;
 
-  q[0] = prefix;
-  q[1] = opcode;
+  *q++ = prefix;
+  *q = opcode;
   
-  emit_byte (&arg, BFD_RELOC_8);
+  if (emit_byte (& arg, BFD_RELOC_8) != 0)
+    return NULL;
 
   return p;
 }
@@ -4113,7 +4082,9 @@ emit_insn_n (char prefix, char opcode, const char *args)
 static void
 emit_data (int size ATTRIBUTE_UNUSED)
 {
-  const char *p;
+  const char *p, *q;
+  char *u, quote;
+  int cnt;
   expressionS exp;
 
   if (is_it_end_of_statement ())
@@ -4121,77 +4092,46 @@ emit_data (int size ATTRIBUTE_UNUSED)
       demand_empty_rest_of_line ();
       return;
     }
-
   p = skip_space (input_line_pointer);
 
-  for (;;)
+  do
     {
       if (*p == '\"' || *p == '\'')
         {
-          p = process_string_literal (p);
+          quote = *p;
+          q = ++p;
+          cnt = 0;
+          while (*p && quote != *p)
+            {
+              ++p;
+              ++cnt;
+            }
+          u = frag_more (cnt);
+          memcpy (u, q, cnt);
+          if (!*p)
+            as_warn (_("unterminated string"));
+          else
+            p = skip_space (p + 1);
         }
       else
         {
-          p = process_expression (p, &exp);
-          if (p == NULL)
-            break;
+          p = parse_exp (p, &exp);
+          if (exp.X_op == O_md1 || exp.X_op == O_register)
+            {
+              ill_op ();
+              break;
+            }
+          if (exp.X_md)
+            as_warn (_("parentheses ignored"));
+          emit_byte (&exp, BFD_RELOC_8);
+          p = skip_space (p);
         }
-
       if (*p != ',')
         break;
-      
-      p = skip_space (p + 1);
+      ++p;
     }
-
-  input_line_pointer = (char *)p;
-}
-
-static const char *
-process_string_literal (const char *p)
-{
-  char quote = *p;
-  const char *start = ++p;
-  int length = 0;
-
-  while (*p != '\0' && *p != quote)
-    {
-      p++;
-      length++;
-    }
-
-  if (length > 0)
-    {
-      char *dest = frag_more (length);
-      memcpy (dest, start, length);
-    }
-
-  if (*p == '\0')
-    {
-      as_warn (_("unterminated string"));
-      return p;
-    }
-
-  return skip_space (p + 1);
-}
-
-static const char *
-process_expression (const char *p, expressionS *exp)
-{
-  p = parse_exp (p, exp);
-
-  if (exp->X_op == O_md1 || exp->X_op == O_register)
-    {
-      ill_op ();
-      return NULL;
-    }
-
-  if (exp->X_md)
-    {
-      as_warn (_("parentheses ignored"));
-    }
-
-  emit_byte (exp, BFD_RELOC_8);
-  return skip_space (p);
+  while (1);
+  input_line_pointer = (char*)p;
 }
 
 static void
@@ -4205,33 +4145,25 @@ z80_cons (int size)
       demand_empty_rest_of_line ();
       return;
     }
-
   p = skip_space (input_line_pointer);
 
-  while (1)
+  do
     {
       p = parse_exp (p, &exp);
-      
       if (exp.X_op == O_md1 || exp.X_op == O_register)
-        {
-          ill_op ();
-          break;
-        }
-      
+	{
+	  ill_op ();
+	  break;
+	}
       if (exp.X_md)
-        as_warn (_("parentheses ignored"));
-      
+	as_warn (_("parentheses ignored"));
       emit_data_val (&exp, size);
-      
       p = skip_space (p);
-      
       if (*p != ',')
         break;
-      
       p++;
-    }
-  
-  input_line_pointer = (char *)p;
+    } while (1);
+  input_line_pointer = (char*)p;
 }
 
 /* next functions were commented out because it is difficult to mix
@@ -4257,61 +4189,58 @@ assume (int arg ATTRIBUTE_UNUSED)
   int n;
 
   input_line_pointer = (char*)skip_space (input_line_pointer);
-  c = get_symbol_name (&name);
-  
+  c = get_symbol_name (& name);
   if (strncasecmp (name, "ADL", 3) != 0)
     {
       ill_op ();
-      restore_line_pointer (c);
       return;
     }
 
   restore_line_pointer (c);
   input_line_pointer = (char*)skip_space (input_line_pointer);
-  
-  if (*input_line_pointer != '=')
+  if (*input_line_pointer++ != '=')
     {
       error (_("assignment expected"));
       return;
     }
-  
-  input_line_pointer++;
   input_line_pointer = (char*)skip_space (input_line_pointer);
   n = get_single_number ();
+
   set_cpu_mode (n);
 }
 
 static const char *
-emit_mulub(char prefix ATTRIBUTE_UNUSED, char opcode, const char *args)
+emit_mulub (char prefix ATTRIBUTE_UNUSED, char opcode, const char * args)
 {
-    const char *p = skip_space(args);
-    
-    if (TOLOWER(*p) != 'a' || *(p + 1) != ',') {
-        ill_op();
-        return p;
+  const char *p;
+  char *q, reg;
+
+  p = skip_space (args);
+  if (TOLOWER (*p++) != 'a' || *p++ != ',')
+    {
+      ill_op ();
+      return p;
     }
-    
-    p += 2;
-    char reg = TOLOWER(*p);
-    p++;
-    
-    if (reg < 'b' || reg > 'e') {
-        ill_op();
-        return p;
+
+  reg = TOLOWER (*p++);
+  if (reg < 'b' || reg > 'e')
+    {
+      ill_op ();
+      return p;
     }
-    
-    check_mach(INS_R800);
-    
-    if (*skip_space(p) != '\0') {
-        ill_op();
-        return p;
+
+  check_mach (INS_R800);
+  if (*skip_space (p))
+    {
+      ill_op ();
+      return p;
     }
-    
-    char *q = frag_more(2);
-    *q++ = prefix;
-    *q = opcode + ((reg - 'b') << 3);
-    
-    return p;
+
+  q = frag_more (2);
+  *q++ = prefix;
+  *q = opcode + ((reg - 'b') << 3);
+
+  return p;
 }
 
 static const char *
@@ -4322,8 +4251,7 @@ emit_muluw (char prefix ATTRIBUTE_UNUSED, char opcode, const char * args)
   char *q;
 
   p = skip_space (args);
-  
-  if (TOLOWER (*p) != 'h' || TOLOWER (*(p + 1)) != 'l' || *(p + 2) != ',')
+  if (TOLOWER (*p) != 'h' || TOLOWER (*(p+1)) != 'l' || *(p+2) != ',')
     {
       ill_op ();
       return p;
@@ -4348,7 +4276,7 @@ emit_muluw (char prefix ATTRIBUTE_UNUSED, char opcode, const char * args)
   q = frag_more (2);
   *q++ = prefix;
   *q = opcode + ((reg.X_add_number & 3) << 4);
-  
+
   return p;
 }
 
@@ -4357,105 +4285,56 @@ assemble_suffix (const char **suffix)
 {
   static const char sf[8][4] = 
     {
-      "il",
-      "is",
-      "l",
-      "lil",
-      "lis",
-      "s",
-      "sil",
-      "sis"
+      "il", "is", "l", "lil", "lis", "s", "sil", "sis"
     };
   
-  const char *p = *suffix;
-  if (p == NULL || *p != '.')
+  static const struct {
+    int adl_value;
+    int z80_value;
+    int inst_mode_value;
+  } suffix_map[8] = {
+    {0x5B, 0x52, INST_MODE_FORCED | INST_MODE_S | INST_MODE_IL},
+    {0x49, 0x40, INST_MODE_FORCED | INST_MODE_S | INST_MODE_IS},
+    {0x5B, 0x49, INST_MODE_FORCED | INST_MODE_L | INST_MODE_IS},
+    {0x5B, 0x5B, INST_MODE_FORCED | INST_MODE_L | INST_MODE_IL},
+    {0x49, 0x49, INST_MODE_FORCED | INST_MODE_L | INST_MODE_IS},
+    {0x52, 0x40, INST_MODE_FORCED | INST_MODE_S | INST_MODE_IS},
+    {0x52, 0x52, INST_MODE_FORCED | INST_MODE_S | INST_MODE_IL},
+    {0x40, 0x40, INST_MODE_FORCED | INST_MODE_S | INST_MODE_IS}
+  };
+  
+  const char *p;
+  const char (*t)[4];
+  char sbuf[4];
+  int i, suffix_index, opcode;
+
+  if (!suffix)
     return 0;
-  
-  p++;
-  
-  char sbuf[4] = {0};
-  int i;
-  for (i = 0; i < 3 && ISALPHA(*p); i++)
-  {
-    sbuf[i] = TOLOWER(*p);
-    p++;
-  }
+
+  p = *suffix;
+  if (!p || *p++ != '.')
+    return 0;
+
+  for (i = 0; (i < 3) && *p && ISALPHA(*p); i++)
+    sbuf[i] = TOLOWER(*p++);
   
   if (*p && !is_whitespace(*p))
     return 0;
   
+  sbuf[i] = '\0';
   *suffix = p;
-  
-  const char (*t)[4] = bsearch(sbuf, sf, ARRAY_SIZE(sf), sizeof(sf[0]), 
-                               (int(*)(const void*, const void*))strcmp);
-  if (t == NULL)
+
+  t = bsearch(sbuf, sf, ARRAY_SIZE(sf), sizeof(sf[0]), (int(*)(const void*, const void*))strcmp);
+  if (!t)
     return 0;
-  
-  int index = t - sf;
-  int opcode = get_opcode_for_suffix(index);
+
+  suffix_index = (int)(t - sf);
+  opcode = cpu_mode ? suffix_map[suffix_index].adl_value : suffix_map[suffix_index].z80_value;
   
   *frag_more(1) = opcode;
-  set_inst_mode_for_opcode(opcode);
+  inst_mode = suffix_map[suffix_index].inst_mode_value;
   
   return 1;
-}
-
-static int get_opcode_for_suffix(int index)
-{
-  static const int opcodes[8] = {
-    -1,   
-    -1,   
-    -1,   
-    0x5B, 
-    0x49, 
-    -1,   
-    0x52, 
-    0x40  
-  };
-  
-  if (index < 0 || index >= 8)
-    return 0;
-  
-  int opcode = opcodes[index];
-  if (opcode != -1)
-    return opcode;
-  
-  static const int cpu_mode_opcodes[3][2] = {
-    {0x52, 0x5B}, 
-    {0x40, 0x49}, 
-    {0x40, 0x52}  
-  };
-  
-  static const int mode_indices[3] = {0, 1, 5};
-  
-  for (int i = 0; i < 3; i++)
-  {
-    if (index == mode_indices[i])
-      return cpu_mode ? cpu_mode_opcodes[i][1] : cpu_mode_opcodes[i][0];
-  }
-  
-  return cpu_mode ? 0x49 : 0x5B;
-}
-
-static void set_inst_mode_for_opcode(int opcode)
-{
-  switch (opcode)
-  {
-    case 0x40:
-      inst_mode = INST_MODE_FORCED | INST_MODE_S | INST_MODE_IS;
-      break;
-    case 0x49:
-      inst_mode = INST_MODE_FORCED | INST_MODE_L | INST_MODE_IS;
-      break;
-    case 0x52:
-      inst_mode = INST_MODE_FORCED | INST_MODE_S | INST_MODE_IL;
-      break;
-    case 0x5B:
-      inst_mode = INST_MODE_FORCED | INST_MODE_L | INST_MODE_IL;
-      break;
-    default:
-      break;
-  }
 }
 
 static void
@@ -4476,56 +4355,44 @@ set_inss (int inss)
   int old_ins;
 
   if (!sdcc_compat)
-    {
-      as_fatal (_("Invalid directive"));
-      return;
-    }
+    as_fatal (_("Invalid directive"));
 
   old_ins = ins_ok;
   ins_ok = (ins_ok & INS_MARCH_MASK) | inss;
-  
   if (old_ins != ins_ok)
-    {
-      cpu_mode = 0;
-    }
+    cpu_mode = 0;
 }
 
 static void
-ignore (int arg ATTRIBUTE_UNUSED)
+ignore(int arg ATTRIBUTE_UNUSED)
 {
-  ignore_rest_of_line ();
+    ignore_rest_of_line();
 }
 
 static void
-area (int arg)
+area(int arg)
 {
-  char *p;
-  char saved_char;
-  
-  if (!sdcc_compat)
-    {
-      as_fatal (_("Invalid directive"));
-      return;
+    char *p;
+    
+    if (!sdcc_compat) {
+        as_fatal(_("Invalid directive"));
+        return;
     }
     
-  p = input_line_pointer;
-  while (*p != '\0' && *p != '(' && *p != '\n')
-    {
-      p++;
+    p = input_line_pointer;
+    while (*p != '\0' && *p != '(' && *p != '\n') {
+        p++;
     }
     
-  if (*p != '(')
-    {
-      psect (arg);
-      return;
+    if (*p == '(') {
+        *p = '\n';
+        psect(arg);
+        *p = '(';
+        p++;
+        ignore_rest_of_line();
+    } else {
+        psect(arg);
     }
-    
-  saved_char = *p;
-  *p = '\n';
-  psect (arg);
-  *p = saved_char;
-  p++;
-  ignore_rest_of_line ();
 }
 
 /* Port specific pseudo ops.  */
@@ -4691,118 +4558,115 @@ static table_t instab[] =
   { "xor",  0x00, 0xA8, emit_s,    INS_ALL },
 } ;
 
-void md_assemble(char *str) {
-    const char *p;
-    char *old_ptr;
-    int i;
-    table_t *insp;
+void
+md_assemble (char *str)
+{
+  const char *p;
+  char *old_ptr;
+  int i;
+  table_t *insp;
 
-    err_flag = 0;
-    inst_mode = cpu_mode ? (INST_MODE_L | INST_MODE_IL) : (INST_MODE_S | INST_MODE_IS);
-    old_ptr = input_line_pointer;
-    p = skip_space(str);
-    
-    for (i = 0; (i < BUFLEN) && (ISALPHA(*p) || ISDIGIT(*p)); i++) {
-        buf[i] = TOLOWER(*p);
-        p++;
+  if (!str)
+    return;
+
+  err_flag = 0;
+  inst_mode = cpu_mode ? (INST_MODE_L | INST_MODE_IL) : (INST_MODE_S | INST_MODE_IS);
+  old_ptr = input_line_pointer;
+  p = skip_space(str);
+
+  for (i = 0; i < BUFLEN && (ISALPHA(*p) || ISDIGIT(*p)); i++, p++)
+    buf[i] = TOLOWER(*p);
+
+  if (i == BUFLEN) {
+    buf[BUFLEN - 3] = '.';
+    buf[BUFLEN - 2] = '.';
+    buf[BUFLEN - 1] = '\0';
+    as_bad(_("Unknown instruction '%s'"), buf);
+    goto end;
+  }
+
+  buf[i] = '\0';
+  dwarf2_emit_insn(0);
+
+  if (*p && !is_whitespace(*p)) {
+    if (*p != '.' || !(ins_ok & INS_EZ80) || !assemble_suffix(&p)) {
+      as_bad(_("syntax error"));
+      goto end;
     }
+  }
 
-    if (i == BUFLEN) {
-        buf[BUFLEN - 3] = '.';
-        buf[BUFLEN - 2] = '.';
-        buf[BUFLEN - 1] = '\0';
-        as_bad(_("Unknown instruction '%s'"), buf);
-        input_line_pointer = old_ptr;
-        return;
-    }
+  p = skip_space(p);
+  key = buf;
 
-    dwarf2_emit_insn(0);
-    
-    if (*p && !is_whitespace(*p)) {
-        if (*p != '.' || !(ins_ok & INS_EZ80) || !assemble_suffix(&p)) {
-            as_bad(_("syntax error"));
-            input_line_pointer = old_ptr;
-            return;
-        }
-    }
-    
-    buf[i] = '\0';
-    p = skip_space(p);
-    key = buf;
-
-    insp = bsearch(&key, instab, ARRAY_SIZE(instab), sizeof(instab[0]), key_cmp);
-    
-    if (!insp || (insp->inss && !(insp->inss & ins_ok))) {
-        *frag_more(1) = 0;
-        as_bad(_("Unknown instruction `%s'"), buf);
-        input_line_pointer = old_ptr;
-        return;
-    }
-
+  insp = bsearch(&key, instab, ARRAY_SIZE(instab), sizeof(instab[0]), key_cmp);
+  if (!insp || (insp->inss && !(insp->inss & ins_ok))) {
+    *frag_more(1) = 0;
+    as_bad(_("Unknown instruction `%s'"), buf);
+  } else {
     p = insp->fp(insp->prefix, insp->opcode, p);
     p = skip_space(p);
-    
-    if (!err_flag && *p) {
-        as_bad(_("junk at end of line, first unrecognized character is `%c'"), *p);
-    }
-    
-    input_line_pointer = old_ptr;
+    if (!err_flag && *p)
+      as_bad(_("junk at end of line, first unrecognized character is `%c'"), *p);
+  }
+
+end:
+  input_line_pointer = old_ptr;
 }
 
-static int signed_overflow(signed long value, unsigned bitsize)
+static int
+signed_overflow (signed long value, unsigned bitsize)
 {
-    if (bitsize == 0 || bitsize > sizeof(signed long) * 8) {
-        return 1;
-    }
-    
-    signed long max = (signed long)((1UL << (bitsize - 1)) - 1);
-    signed long min = -max - 1;
-    
-    return value < min || value > max;
+  if (bitsize == 0 || bitsize > sizeof(signed long) * 8) {
+    return 1;
+  }
+  
+  signed long max = (signed long) ((1UL << (bitsize - 1)) - 1);
+  signed long min = -max - 1;
+  return value < min || value > max;
 }
 
-static int unsigned_overflow(unsigned long value, unsigned bitsize)
+static int
+unsigned_overflow (unsigned long value, unsigned bitsize)
 {
-    if (bitsize == 0 || bitsize > (sizeof(unsigned long) * 8)) {
-        return 1;
-    }
-    
-    if (bitsize >= (sizeof(unsigned long) * 8)) {
-        return 0;
-    }
-    
-    unsigned long max_value = ~0UL;
-    unsigned int shift_amount = sizeof(unsigned long) * 8 - bitsize;
-    max_value = max_value >> shift_amount;
-    
-    return value > max_value;
+  if (bitsize == 0 || bitsize > sizeof(unsigned long) * 8) {
+    return 1;
+  }
+  
+  if (bitsize >= sizeof(unsigned long) * 8) {
+    return 0;
+  }
+  
+  unsigned long max_value = (1UL << bitsize) - 1;
+  return value > max_value;
 }
 
-static int is_overflow(long value, unsigned bitsize)
+static int
+is_overflow(long value, unsigned bitsize)
 {
     return (value < 0) ? signed_overflow(value, bitsize) : unsigned_overflow(value, bitsize);
 }
 
 void
-md_apply_fix (fixS * fixP, valueT* valP, segT seg)
+md_apply_fix(fixS *fixP, valueT *valP, segT seg)
 {
-  long val = *valP;
-  char *p_lit = fixP->fx_where + fixP->fx_frag->fr_literal;
-
-  if (fixP->fx_addsy == NULL)
-    fixP->fx_done = 1;
-  else if (fixP->fx_pcrel)
-    {
-      segT s = S_GET_SEGMENT (fixP->fx_addsy);
-      if (s == seg || s == absolute_section)
-	{
-	  val += S_GET_VALUE (fixP->fx_addsy);
-	  fixP->fx_done = 1;
-	}
+    if (!fixP || !valP) {
+        return;
     }
 
-  switch (fixP->fx_r_type)
-    {
+    long val = *valP;
+    char *p_lit = fixP->fx_where + fixP->fx_frag->fr_literal;
+
+    if (fixP->fx_addsy == NULL) {
+        fixP->fx_done = 1;
+    } else if (fixP->fx_pcrel) {
+        segT s = S_GET_SEGMENT(fixP->fx_addsy);
+        if (s == seg || s == absolute_section) {
+            val += S_GET_VALUE(fixP->fx_addsy);
+            fixP->fx_done = 1;
+        }
+    }
+
+    switch (fixP->fx_r_type) {
     case BFD_RELOC_8_PCREL:
     case BFD_RELOC_Z80_DISP8:
     case BFD_RELOC_8:
@@ -4810,91 +4674,95 @@ md_apply_fix (fixS * fixP, valueT* valP, segT seg)
     case BFD_RELOC_24:
     case BFD_RELOC_32:
     case BFD_RELOC_Z80_16_BE:
-      fixP->fx_no_overflow = 0;
-      break;
+        fixP->fx_no_overflow = 0;
+        break;
     default:
-      fixP->fx_no_overflow = 1;
-      break;
+        fixP->fx_no_overflow = 1;
+        break;
     }
 
-  switch (fixP->fx_r_type)
-    {
+    switch (fixP->fx_r_type) {
     case BFD_RELOC_8_PCREL:
     case BFD_RELOC_Z80_DISP8:
-      if (fixP->fx_done && signed_overflow (val, 8))
-	as_bad_where (fixP->fx_file, fixP->fx_line,
-		      _("8-bit signed offset out of range (%+ld)"), val);
-      *p_lit = val;
-      break;
+        if (fixP->fx_done && signed_overflow(val, 8)) {
+            as_bad_where(fixP->fx_file, fixP->fx_line,
+                        _("8-bit signed offset out of range (%+ld)"), val);
+        }
+        *p_lit = (char)(val & 0xFF);
+        break;
 
     case BFD_RELOC_Z80_BYTE0:
-      *p_lit = val;
-      break;
+        *p_lit = (char)(val & 0xFF);
+        break;
 
     case BFD_RELOC_Z80_BYTE1:
-      *p_lit = (val >> 8);
-      break;
+        *p_lit = (char)((val >> 8) & 0xFF);
+        break;
 
     case BFD_RELOC_Z80_BYTE2:
-      *p_lit = (val >> 16);
-      break;
+        *p_lit = (char)((val >> 16) & 0xFF);
+        break;
 
     case BFD_RELOC_Z80_BYTE3:
-      *p_lit = (val >> 24);
-      break;
+        *p_lit = (char)((val >> 24) & 0xFF);
+        break;
 
     case BFD_RELOC_8:
-      if (fixP->fx_done && is_overflow(val, 8))
-	as_warn_where (fixP->fx_file, fixP->fx_line,
-		       _("8-bit overflow (%+ld)"), val);
-      *p_lit = val;
-      break;
+        if (fixP->fx_done && is_overflow(val, 8)) {
+            as_warn_where(fixP->fx_file, fixP->fx_line,
+                         _("8-bit overflow (%+ld)"), val);
+        }
+        *p_lit = (char)(val & 0xFF);
+        break;
 
     case BFD_RELOC_Z80_WORD1:
-      p_lit[0] = (val >> 16);
-      p_lit[1] = (val >> 24);
-      break;
+        p_lit[0] = (char)((val >> 16) & 0xFF);
+        p_lit[1] = (char)((val >> 24) & 0xFF);
+        break;
 
     case BFD_RELOC_Z80_WORD0:
-      p_lit[0] = val;
-      p_lit[1] = (val >> 8);
-      break;
+        p_lit[0] = (char)(val & 0xFF);
+        p_lit[1] = (char)((val >> 8) & 0xFF);
+        break;
 
     case BFD_RELOC_16:
-      if (fixP->fx_done && is_overflow(val, 16))
-	as_warn_where (fixP->fx_file, fixP->fx_line,
-		       _("16-bit overflow (%+ld)"), val);
-      p_lit[0] = val;
-      p_lit[1] = (val >> 8);
-      break;
+        if (fixP->fx_done && is_overflow(val, 16)) {
+            as_warn_where(fixP->fx_file, fixP->fx_line,
+                         _("16-bit overflow (%+ld)"), val);
+        }
+        p_lit[0] = (char)(val & 0xFF);
+        p_lit[1] = (char)((val >> 8) & 0xFF);
+        break;
 
     case BFD_RELOC_24:
-      if (fixP->fx_done && is_overflow(val, 24))
-	as_warn_where (fixP->fx_file, fixP->fx_line,
-		       _("24-bit overflow (%+ld)"), val);
-      p_lit[0] = val;
-      p_lit[1] = (val >> 8);
-      p_lit[2] = (val >> 16);
-      break;
+        if (fixP->fx_done && is_overflow(val, 24)) {
+            as_warn_where(fixP->fx_file, fixP->fx_line,
+                         _("24-bit overflow (%+ld)"), val);
+        }
+        p_lit[0] = (char)(val & 0xFF);
+        p_lit[1] = (char)((val >> 8) & 0xFF);
+        p_lit[2] = (char)((val >> 16) & 0xFF);
+        break;
 
     case BFD_RELOC_32:
-      if (fixP->fx_done && is_overflow(val, 32))
-	as_warn_where (fixP->fx_file, fixP->fx_line,
-		       _("32-bit overflow (%+ld)"), val);
-      p_lit[0] = val;
-      p_lit[1] = (val >> 8);
-      p_lit[2] = (val >> 16);
-      p_lit[3] = (val >> 24);
-      break;
+        if (fixP->fx_done && is_overflow(val, 32)) {
+            as_warn_where(fixP->fx_file, fixP->fx_line,
+                         _("32-bit overflow (%+ld)"), val);
+        }
+        p_lit[0] = (char)(val & 0xFF);
+        p_lit[1] = (char)((val >> 8) & 0xFF);
+        p_lit[2] = (char)((val >> 16) & 0xFF);
+        p_lit[3] = (char)((val >> 24) & 0xFF);
+        break;
 
     case BFD_RELOC_Z80_16_BE:
-      p_lit[0] = val >> 8;
-      p_lit[1] = val;
-      break;
+        p_lit[0] = (char)((val >> 8) & 0xFF);
+        p_lit[1] = (char)(val & 0xFF);
+        break;
 
     default:
-      as_fatal (_("md_apply_fix: unknown reloc type 0x%x"), fixP->fx_r_type);
-      break;
+        fprintf(stderr, _("md_apply_fix: unknown reloc type 0x%x\n"), fixP->fx_r_type);
+        abort();
     }
 }
 
@@ -4909,13 +4777,11 @@ md_apply_fix (fixS * fixP, valueT* valP, segT seg)
    needs to be created then it is done here.  */
 
 arelent *
-tc_gen_reloc (asection *seg ATTRIBUTE_UNUSED, fixS *fixp)
+tc_gen_reloc (asection *seg ATTRIBUTE_UNUSED , fixS *fixp)
 {
   arelent *reloc;
-  
-  if (fixp == NULL)
-    return NULL;
-    
+  asymbol **sym_ptr;
+
   if (fixp->fx_subsy != NULL)
     {
       as_bad_subtract (fixp);
@@ -4925,16 +4791,17 @@ tc_gen_reloc (asection *seg ATTRIBUTE_UNUSED, fixS *fixp)
   reloc = notes_alloc (sizeof (arelent));
   if (reloc == NULL)
     return NULL;
-    
-  reloc->sym_ptr_ptr = notes_alloc (sizeof (asymbol *));
-  if (reloc->sym_ptr_ptr == NULL)
+
+  sym_ptr = notes_alloc (sizeof (asymbol *));
+  if (sym_ptr == NULL)
     return NULL;
-    
+
+  reloc->sym_ptr_ptr = sym_ptr;
   *reloc->sym_ptr_ptr = symbol_get_bfdsym (fixp->fx_addsy);
   reloc->address = fixp->fx_frag->fr_address + fixp->fx_where;
   reloc->addend = fixp->fx_offset;
   reloc->howto = bfd_reloc_type_lookup (stdoutput, fixp->fx_r_type);
-  
+
   if (reloc->howto == NULL)
     {
       as_bad_where (fixp->fx_file, fixp->fx_line,
@@ -4945,29 +4812,30 @@ tc_gen_reloc (asection *seg ATTRIBUTE_UNUSED, fixS *fixp)
 
   if (fixp->fx_r_type == BFD_RELOC_VTABLE_INHERIT ||
       fixp->fx_r_type == BFD_RELOC_VTABLE_ENTRY)
-    {
-      reloc->address = fixp->fx_offset;
-    }
+    reloc->address = fixp->fx_offset;
 
   return reloc;
 }
 
-int z80_tc_labels_without_colon(void)
+int
+z80_tc_labels_without_colon(void)
 {
     return colonless_labels;
 }
 
-int z80_tc_label_is_local(const char *name)
+int
+z80_tc_label_is_local (const char *name)
 {
+  const char *n;
+  const char *p;
+  
   if (local_label_prefix == NULL || name == NULL)
     return 0;
   
-  size_t prefix_len = strlen(local_label_prefix);
-  if (prefix_len == 0)
-    return 0;
+  for (p = local_label_prefix, n = name; *p && *n && *n == *p; p++, n++)
+    ;
   
-  return strncmp(name, local_label_prefix, prefix_len) == 0 &&
-         local_label_prefix[prefix_len - 1] != '\0';
+  return *p == '\0';
 }
 
 /* Parse floating point number from string and compute mantissa and
@@ -4982,20 +4850,17 @@ str_to_broken_float (bool *signP, uint64_t *mantissaP, int *expP)
   bool sign;
   uint64_t mantissa = 0;
   int exponent = 0;
-  int binary_exp = 64;
+  int i;
 
   if (!signP || !mantissaP || !expP)
     return 0;
 
   p = (char*)skip_space (input_line_pointer);
-  if (!p)
-    return 0;
-
   sign = (*p == '-');
   *signP = sign;
   if (sign || *p == '+')
     ++p;
-
+  
   if (strncasecmp (p, "NaN", 3) == 0)
     {
       *mantissaP = 0;
@@ -5003,7 +4868,7 @@ str_to_broken_float (bool *signP, uint64_t *mantissaP, int *expP)
       input_line_pointer = p + 3;
       return 1;
     }
-
+  
   if (strncasecmp (p, "inf", 3) == 0)
     {
       *mantissaP = 1ull << 63;
@@ -5011,115 +4876,97 @@ str_to_broken_float (bool *signP, uint64_t *mantissaP, int *expP)
       input_line_pointer = p + 3;
       return 1;
     }
-
-  while (ISDIGIT (*p))
+  
+  for (; ISDIGIT (*p); ++p)
     {
-      if (mantissa > (UINT64_MAX / 10))
+      if (mantissa >> 60)
         {
           if (*p >= '5')
             mantissa++;
-          while (ISDIGIT (*p))
-            {
-              exponent++;
-              p++;
-            }
           break;
         }
       mantissa = mantissa * 10 + (*p - '0');
-      p++;
     }
+  
+  for (; ISDIGIT (*p); ++p)
+    exponent++;
 
   if (*p == '.')
     {
       p++;
-      while (ISDIGIT (*p))
+      if (!exponent)
         {
-          if (exponent == 0 && mantissa <= (UINT64_MAX / 10))
+          for (; ISDIGIT (*p); ++p, --exponent)
             {
+              if (mantissa >> 60)
+                {
+                  if (*p >= '5')
+                    mantissa++;
+                  break;
+                }
               mantissa = mantissa * 10 + (*p - '0');
-              exponent--;
             }
-          p++;
         }
+      for (; ISDIGIT (*p); ++p)
+        ;
     }
-
+  
   if (*p == 'e' || *p == 'E')
     {
-      int exp_sign = 0;
-      int exp_value = 0;
-      p++;
-      
-      if (*p == '-')
+      int es;
+      int t = 0;
+      ++p;
+      es = (*p == '-');
+      if (es || *p == '+')
+        p++;
+      for (; ISDIGIT (*p); ++p)
         {
-          exp_sign = 1;
-          p++;
+          if (t < 100)
+            t = t * 10 + (*p - '0');
         }
-      else if (*p == '+')
-        {
-          p++;
-        }
-
-      while (ISDIGIT (*p))
-        {
-          if (exp_value <= (INT_MAX / 10))
-            exp_value = exp_value * 10 + (*p - '0');
-          p++;
-        }
-      
-      if (exp_sign)
-        exponent -= exp_value;
-      else
-        exponent += exp_value;
+      exponent += (es) ? -t : t;
     }
-
+  
   if (ISALNUM (*p) || *p == '.')
     return 0;
-
+    
   input_line_pointer = p;
-
+  
   if (mantissa == 0)
     {
       *mantissaP = 1ull << 63;
       *expP = EXP_MIN;
       return 1;
     }
-
-  while (mantissa <= (UINT64_MAX / 10))
+  
+  for (; mantissa <= (~0ull/10); --exponent)
+    mantissa *= 10;
+  
+  for (i = 64; exponent > 0; --exponent)
     {
-      mantissa *= 10;
-      exponent--;
-    }
-
-  while (exponent > 0)
-    {
-      while (mantissa > (UINT64_MAX / 10))
+      while (mantissa > (~0ull/10))
         {
           mantissa >>= 1;
-          binary_exp++;
+          i += 1;
         }
       mantissa *= 10;
-      exponent--;
     }
-
-  while (exponent < 0)
+  
+  for (; exponent < 0; ++exponent)
     {
-      while ((mantissa & (1ull << 63)) == 0)
+      while (!(mantissa >> 63))
         {
           mantissa <<= 1;
-          binary_exp--;
+          i -= 1;
         }
       mantissa /= 10;
-      exponent++;
     }
-
-  while ((mantissa & (1ull << 63)) == 0)
-    {
-      mantissa <<= 1;
-      binary_exp--;
-    }
-
+  
+  for (; !(mantissa >> 63); --i)
+    mantissa <<= 1;
+    
   *mantissaP = mantissa;
-  *expP = binary_exp;
+  *expP = i;
   return 1;
 }
 
@@ -5130,53 +4977,59 @@ str_to_zeda32(char *litP, int *sizeP)
   bool sign;
   int exponent;
   unsigned i;
+  const int MANTISSA_BITS = 24;
+  const int EXPONENT_MIN = -127;
+  const int EXPONENT_MAX = 127;
+  const int EXPONENT_ZERO = -128;
+  const uint64_t MANTISSA_MASK = (1ull << 23) - 1;
+  const uint64_t MANTISSA_OVERFLOW_CHECK = 1ull << MANTISSA_BITS;
+  const uint64_t SPECIAL_MANTISSA_ZERO = 0x200000;
+  const uint64_t SPECIAL_MANTISSA_POS_INF = 0x400000;
+  const uint64_t SPECIAL_MANTISSA_NEG_INF = 0xc00000;
 
-  if (litP == NULL || sizeP == NULL)
+  if (!litP || !sizeP)
     return _("invalid parameters");
 
   *sizeP = 4;
   
   if (!str_to_broken_float(&sign, &mantissa, &exponent))
     return _("invalid syntax");
-  
+
   exponent--;
   mantissa >>= 39;
   mantissa++;
   mantissa >>= 1;
-  
-  if (mantissa >> 24)
+
+  if (mantissa >= MANTISSA_OVERFLOW_CHECK)
     {
       mantissa >>= 1;
       exponent++;
     }
-  
-  if (exponent < -127)
+
+  if (exponent < EXPONENT_MIN)
     {
-      exponent = -128;
+      exponent = EXPONENT_ZERO;
       mantissa = 0;
     }
-  else if (exponent > 127)
+  else if (exponent > EXPONENT_MAX)
     {
-      exponent = -128;
-      mantissa = sign ? 0xc00000 : 0x400000;
+      exponent = EXPONENT_ZERO;
+      mantissa = sign ? SPECIAL_MANTISSA_NEG_INF : SPECIAL_MANTISSA_POS_INF;
     }
   else if (mantissa == 0)
     {
-      exponent = -128;
-      mantissa = 0x200000;
+      exponent = EXPONENT_ZERO;
+      mantissa = SPECIAL_MANTISSA_ZERO;
     }
   else if (!sign)
     {
-      mantissa &= (1ull << 23) - 1;
+      mantissa &= MANTISSA_MASK;
     }
+
+  for (i = 0; i < MANTISSA_BITS; i += 8)
+    *litP++ = mantissa >> i;
   
-  for (i = 0; i < 24; i += 8)
-    {
-      *litP++ = (char)(mantissa >> i);
-    }
-  
-  *litP = (char)(0x80 + exponent);
-  
+  *litP = 0x80 + exponent;
   return NULL;
 }
 
@@ -5197,39 +5050,50 @@ str_to_float48(char *litP, int *sizeP)
   bool sign;
   int exponent;
   unsigned i;
+  const uint64_t MANTISSA_40_MASK = (1ull << 40) - 1;
+  const uint64_t MANTISSA_39_MASK = (1ull << 39) - 1;
+  const int MIN_EXPONENT = -127;
+  const int MAX_EXPONENT = 127;
+  const int EXPONENT_BIAS = 0x80;
+  const int MANTISSA_BITS = 40;
+  const int BITS_PER_BYTE = 8;
+  const int RESULT_SIZE = 6;
 
-  *sizeP = 6;
+  if (!litP || !sizeP)
+    return _("invalid parameters");
+
+  *sizeP = RESULT_SIZE;
   
   if (!str_to_broken_float(&sign, &mantissa, &exponent))
     return _("invalid syntax");
-  
+
   mantissa >>= 23;
-  mantissa++;
+  ++mantissa;
   mantissa >>= 1;
-  
-  if (mantissa >> 40)
+
+  if (mantissa & ~MANTISSA_40_MASK)
     {
       mantissa >>= 1;
-      exponent++;
+      ++exponent;
     }
-  
-  if (exponent < -127)
+
+  if (exponent < MIN_EXPONENT)
     {
-      memset(litP, 0, 6);
+      memset(litP, 0, RESULT_SIZE);
       return NULL;
     }
-  
-  if (exponent > 127)
+
+  if (exponent > MAX_EXPONENT)
     return _("overflow");
-  
+
   if (!sign)
-    mantissa &= (1ull << 39) - 1;
+    mantissa &= MANTISSA_39_MASK;
+
+  *litP++ = EXPONENT_BIAS + exponent;
   
-  *litP++ = 0x80 + exponent;
-  
-  for (i = 0; i < 40; i += 8)
+  for (i = 0; i < MANTISSA_BITS; i += BITS_PER_BYTE)
     *litP++ = mantissa >> i;
-  
+
   return NULL;
 }
 
@@ -5237,7 +5101,7 @@ static const char *
 str_to_ieee754_h(char *litP, int *sizeP)
 {
   if (litP == NULL || sizeP == NULL) {
-    return NULL;
+    return "Invalid null pointer";
   }
   return ieee_md_atof('h', litP, sizeP, false);
 }
@@ -5246,7 +5110,7 @@ static const char *
 str_to_ieee754_s(char *litP, int *sizeP)
 {
   if (litP == NULL || sizeP == NULL) {
-    return NULL;
+    return "Invalid parameters";
   }
   return ieee_md_atof('s', litP, sizeP, false);
 }
@@ -5254,9 +5118,10 @@ str_to_ieee754_s(char *litP, int *sizeP)
 static const char *
 str_to_ieee754_d(char *litP, int *sizeP)
 {
-  if (litP == NULL || sizeP == NULL)
-    return NULL;
-    
+  if (litP == NULL || sizeP == NULL) {
+    return "Invalid null pointer argument";
+  }
+  
   return ieee_md_atof('d', litP, sizeP, false);
 }
 
@@ -5297,7 +5162,7 @@ z80_tc_regname_to_dw2regnum (const char *regname)
 int
 z80_dwarf2_addr_size (const bfd *abfd)
 {
-  if (abfd == NULL)
+  if (!abfd)
     return 2;
     
   return (bfd_get_mach (abfd) == bfd_mach_ez80_adl) ? 3 : 2;
